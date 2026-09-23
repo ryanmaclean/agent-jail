@@ -1,0 +1,12 @@
+schema = "ryanlab.project.v1"
+name = "agent-jail"
+status = "experimental"
+role = "BSD jail-based agent isolation control"
+
+canonical_for = ["bsd-jail-agent-isolation"]
+integrates_with = ["smolfire", "moth", "bop"]
+do_not_implement = ["agent-orchestration", "image-builder", "worker-runtime"]
+
+registry = "ryanmaclean/skills:docs/PROJECTS.md"
+glossary = "ryanmaclean/skills:docs/GLOSSARY.md"
+benchmark_schema = "ryanmaclean/skills:schemas/bench.v1.schema.json"
