@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-# tests/jail-execute-test.nu — bin/jail-execute.nu (agent-jail canonical copy).
+# tests/jail-execute-test.nu — agent-jail lifecycle tests.
 #
-# Vendored from ryanmaclean/smolfire@ae2110b tests/jail-execute-test.nu (agent-jail#2).
+# Lifecycle tests transferred from ryanmaclean/smolfire@ae2110b for
+# first-party ownership (agent-jail#2).
 # Test numbers are kept from the smolfire suite so results can be compared
 # 1:1. Tests 10 and 22-27 exercise smolfire's coordinator (coord-tick.nu
 # executor routing, mbox dispatch envelope) and stay in smolfire with its

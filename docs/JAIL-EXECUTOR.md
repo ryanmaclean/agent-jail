@@ -1,14 +1,17 @@
 # Jail executor (experimental)
 
-> **Canonical home: `ryanmaclean/agent-jail`.** Vendored from
-> `ryanmaclean/smolfire@ae2110b` per smolfire ADR 0001 and agent-jail#2
+> **Canonical home: `ryanmaclean/agent-jail`.** Lifecycle source transferred
+> from `ryanmaclean/smolfire@ae2110b` as a first-party ownership move per
+> smolfire ADR 0001 and agent-jail#2
 > (registry rule "jail isolation -> agent-jail"). agent-jail owns jail
 > lifecycle: create, harden, run, teardown. smolfire keeps the **caller**
 > side: `coord-tick.nu` executor routing (`resolve-executor`), the spool
 > request format, and the mbox reply envelope (`dispatch`, `reply-envelope`,
 > `mbox-append-prefix`). Those parts are described below for context, but the
-> code lives in smolfire and calls `run-jail-task` here through its thin
-> adapter. Issue and section references such as "issue #39" and
+> caller code remains in smolfire. Its current file still duplicates the
+> jail lifecycle; the paired adapter must remove that copy and invoke this
+> repo's versioned `run` contract. Issue and section references such as
+> "issue #39" and
 > `docs/BOOT-TIME-ROADMAP.md` point at **smolfire**.
 >
 > Discover the contract without reading this file:
@@ -28,7 +31,7 @@ the default: `vm` stays the executor unless you opt in.
 | `bin/jail-execute.nu` (agent-jail) | Executor. Sibling of smolfire's `bin/vm-execute.nu` with the same contract. `run` and `contract` subcommands |
 | `tests/jail-execute-test.nu` (agent-jail) | 29 host-independent tests that stub the FreeBSD tools on `PATH` (smolfire test numbering kept; 10 and 22-27 stay in smolfire, 35-36 are new). Run with `nu tests/run-all.nu` |
 | smolfire `bin/coord-tick.nu` | Caller. Picks the executor per request (`resolve-executor`) and spawns the jail dispatch for `jail` |
-| smolfire `bin/jail-execute.nu dispatch` | Caller-side adapter. Reads the spool request, calls `run-jail-task`, appends the mbox reply. Until the adapter swap lands in smolfire, smolfire still carries its own copy of the executor |
+| smolfire `bin/jail-execute.nu dispatch` | Current dispatch path and lifecycle duplicate. The paired smolfire change must replace this with a thin caller adapter that invokes agent-jail's pinned `run` contract and appends the mbox reply |
 
 ## 1. Contract
 
@@ -134,6 +137,10 @@ not recommended — see FreeBSD-SA-26:59.mac_do / CVE-2026-58092).
   Tests confirm that none of the stubbed binaries run.
 
 ## 2. Enabling it (smolfire caller side)
+
+The routing below describes smolfire's current local executor. This PR does
+not yet connect it to agent-jail's `run` CLI; the paired adapter/removal change
+is required for single ownership.
 
 Default is `vm`. Precedence: the request TOML field `executor`, then the
 `SMOLFIRE_EXECUTOR` env var, then `"vm"`.

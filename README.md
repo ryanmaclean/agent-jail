@@ -8,8 +8,10 @@ Canonical owner of BSD jail isolation (registry: `ryanmaclean/skills` docs/PROJE
 
 `bin/jail-execute.nu` runs a task's commands in an ephemeral, hardened FreeBSD jail
 (nullfs `--base`, `zfs clone --zfs-snapshot`, or ocijail `--image`) and returns
-`{verdict, boot_sec, outputs, error?, warnings?}` as JSON. Moved here from
-`ryanmaclean/smolfire` (ADR 0001, agent-jail#2). smolfire's coordinator is the caller.
+`{verdict, boot_sec, outputs, error?, warnings?}` as JSON. The lifecycle source was
+transferred from `ryanmaclean/smolfire` for first-party ownership (ADR 0001,
+agent-jail#2). The paired smolfire adapter and removal of its lifecycle copy
+are pending; smolfire's coordinator remains the caller.
 
 ```sh
 nu bin/jail-execute.nu contract                                   # JSON contract, no host access

@@ -3,11 +3,11 @@
 # bin/jail-execute.nu — execute commands inside an ephemeral FreeBSD jail (EXPERIMENTAL)
 #
 # Canonical home: ryanmaclean/agent-jail (registry: "jail isolation -> agent-jail").
-# Vendored from ryanmaclean/smolfire@ae2110b bin/jail-execute.nu per
-# smolfire ADR 0001 / agent-jail#2. Behaviour-preserving: the pure helpers,
-# run-jail-task, and the `run` CLI are unchanged. The smolfire-coordinator mbox
-# protocol (`dispatch`, reply-envelope, mbox-append-prefix) is NOT here: that is
-# the caller's envelope and stays in smolfire's thin adapter.
+# Lifecycle source transferred from ryanmaclean/smolfire@ae2110b
+# bin/jail-execute.nu as a first-party ownership move (smolfire ADR 0001 /
+# agent-jail#2). The smolfire coordinator's mbox protocol (`dispatch`,
+# reply-envelope, mbox-append-prefix) belongs to its paired thin adapter.
+# That adapter must replace smolfire's remaining lifecycle copy before merge.
 #
 # Sibling of smolfire's bin/vm-execute.nu with the same contract: task id + commands in,
 # {verdict, boot_sec, outputs: [{cmd, stdout, stderr, exit_code}], error?} out.
