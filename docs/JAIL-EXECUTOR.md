@@ -70,7 +70,7 @@ not recommended — see FreeBSD-SA-26:59.mac_do / CVE-2026-58092).
 | Flag | Rootfs | Writable | Destroyed by |
 |---|---|---|---|
 | `--base DIR` | Thin jail. `DIR` is mounted read-only with nullfs at `<jail-root>/<name>` | tmpfs `/tmp` only (size-capped) | `jail -r` unmounts it. `rmdir` removes the directory |
-| `--zfs-snapshot DS@SNAP` | `zfs clone` into a sibling dataset `<parent>/<name>` for each task | whole clone, plus tmpfs `/tmp` | `zfs destroy -f` |
+| `--zfs-snapshot DS@SNAP` | `zfs clone` into a sibling dataset `<parent>/<name>` for each task | whole clone, plus tmpfs `/tmp` | `zfs destroy` |
 | `--image REF` | OCI image through `podman run --runtime ocijail --read-only` | tmpfs `/tmp` | `podman rm --force` |
 
 ### Per-task guarantees (enforced in code, tested with stubs)
@@ -123,12 +123,27 @@ not recommended — see FreeBSD-SA-26:59.mac_do / CVE-2026-58092).
   `daemon -f sleep 600; echo spawned` prints `spawned` and then exits `124`
   at the deadline. This is bounded and safe, and `jail -r` kills the orphan,
   but the task fails. Commands must not leave background processes running.
-- **Teardown always runs,** in this order: `jail -r`, `rctl -r`, then
-  `zfs destroy` or `rmdir`, then removal of the private jail.conf directory.
-  If `jail -r` fails, the executor force-unmounts `dev`, `tmp` and the base.
-  It uses `rmdir`, **never `rm -rf`**, so a base that is still mounted makes
-  the step fail loudly instead of being deleted through the mount. A failed
-  teardown turns the verdict into `fail`.
+- **Lifecycle finalization:** ordinary setup, file-I/O and run exceptions flow
+  through one finalizer with the latest acquisition acknowledgements. A failed
+  create does not prove absence. Successful jail creation binds its returned JID
+  to an observed JID/name/path; Podman binds its full returned container ID;
+  ZFS binds the new dataset GUID and mountpoint. Queries must succeed.
+- **Conservative retirement:** cleanup checks the captured identity, requests
+  removal, and observes absence. Jail mounts must also be absent before storage
+  removal. Failed or ambiguous jail/container removal never triggers forced
+  unmount, limit removal or dataset/directory removal. Dataset destroy is
+  nonrecursive and does not force unmount. Existing nullfs directories are not
+  adopted. Any incomplete step makes the verdict fail and retains private
+  configuration plus a structured cleanup result for manual reconciliation.
+  The original verdict/boot_sec/outputs/error/warnings fields remain; attempted
+  lifecycles add cleanup.events, cleanup.retired and cleanup.retained. Retained
+  context flags describe acquisition acknowledgements, while events record
+  subsequent retirement outcomes. Preflight refusals keep their original shape.
+- **Limits of ownership evidence:** identity observation and later name-based
+  jail removal are separate native operations, not an atomic generation handle.
+  This handles ordinary cooperative execution; concurrent privileged replacement
+  and abrupt process death remain outside this source proof. Native operations
+  may block; this change does not establish a bounded native teardown deadline.
 - **Input validation:** paths, sizes, image references and ZFS names are
   checked against strict patterns before they reach jail.conf, fstab or argv.
   In coord-tick, spawned values are passed as argv and are never interpolated
@@ -286,7 +301,7 @@ Run these on the FreeBSD build VM, once, before trusting the executor:
    what's left.
 5. After a run, `mount -p | grep /var/smolfire/jails` and `jls` are both
    empty, and so is the directory or the ZFS dataset.
-6. `zfs clone -o mountpoint=...` and `zfs destroy -f` work for each task.
+6. `zfs clone -o mountpoint=...` and `zfs destroy` work for each task.
 7. `podman run --runtime ocijail --read-only --tmpfs /tmp --network none`
    works with a FreeBSD runtime image, and the limits take effect.
 8. End to end: a request with `executor = "jail"` produces a harvested

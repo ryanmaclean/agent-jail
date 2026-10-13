@@ -16,6 +16,7 @@
 # docs/JAIL-EXECUTOR.md "Needs a real FreeBSD host".
 
 use ../bin/jail-execute.nu *
+const TEST_DIR = path self | path dirname
 
 def "assert equal" [left: any, right: any, what: string = ""] {
     if $left != $right {
@@ -94,6 +95,12 @@ exit 0
         $kv.body | save --force $p
         ^chmod +x $p
     }
+    let native = open --raw ($TEST_DIR | path join native-stub.nu)
+    for tool in [jail jls zfs podman mount rctl] {
+        let p = ($bin | path join $tool)
+        $native | str replace "const TOOL = 'unset'" $'const TOOL = "($tool)"' | save --force $p
+        ^chmod +x $p
+    }
     $bin
 }
 
@@ -103,8 +110,27 @@ def with-stubs [tmp: string, bin: string, extra: record, body: closure] {
         PATH: ($env.PATH | prepend $bin)
         MOCK_LOG: ([$tmp "mock.log"] | path join)
         MOCK_DIR: $tmp
+        MOCK_ROOT: ([$tmp "jails"] | path join)
+        TMPDIR: $tmp
     } | merge $extra
     with-env $env_rec { do $body }
+}
+
+def retain-case [tmp: string] {
+    if $env.SUITE_CAPTURE? == null { return }
+    let owned = ($env.TMPDIR | path expand)
+    let actual = ($tmp | path expand)
+    assert (($tmp | path type) == "dir") "capture source must be a directory"
+    assert (($actual | path dirname) == $owned) "capture only direct private TMPDIR child"
+    let dest = ($env.SUITE_CAPTURE | path join ($actual | path basename))
+    mkdir $dest
+    for name in ["mock.log" "last.conf" "last.resolv.conf" "result.json" "jls-observation.json" "jail.json" "podman.json" "zfs.json"] {
+        let src = ($actual | path join $name)
+        if ($src | path exists) {
+            assert (($src | path type) == "file") "capture only regular fixture evidence"
+            open --raw $src | save ($dest | path join $name)
+        }
+    }
 }
 
 def mock-log [tmp: string] {
@@ -285,7 +311,7 @@ do {
     assert equal $cli.exit_code 2 "refusal exit code"
     let j = $cli.stdout | from json
     assert ($j.error | str contains "requires a FreeBSD host")
-    ^rm -rf $tmp
+    retain-case $tmp; ^rm -rf $tmp
 }
 
 # ── Mocked FreeBSD path ───────────────────────────────────────────────────────
@@ -301,7 +327,8 @@ do {
         run-jail-task "task-0042" ["echo hello" "echo err >&2"] --base "/usr/local/smolfire/base" --jail-root (jr $tmp) --salt "ab12cd" --os freebsd
     }
     assert equal $r.verdict "pass" $"verdict: ($r | to nuon)"
-    assert equal ($r | columns) ["verdict" "boot_sec" "outputs"]
+    assert equal ($r | columns) ["verdict" "boot_sec" "outputs" "cleanup"]
+    assert $r.cleanup.retired "observed retirement"
     assert equal ($r.outputs | get stdout) ["hello" ""]
     assert equal ($r.outputs | get stderr) ["" "err"]
     assert equal ($r.outputs | get exit_code) [0 0]
@@ -309,8 +336,8 @@ do {
     let log = mock-log $tmp
     let name = "sf_task_0042_ab12cd"
     assert ((lines-starting $log "mdo -i mkdir") | is-not-empty) "dir via mdo"
-    assert equal (lines-starting $log "jail -c -f" | length) 1 "one create"
-    assert ((lines-starting $log "jail -c -f") | first | str ends-with $name) "create by name"
+    assert equal (lines-starting $log "jail -i -c -f" | length) 1 "one create"
+    assert ((lines-starting $log "jail -i -c -f") | first | str ends-with $name) "create by name"
     assert equal (lines-starting $log "rctl -a" | length) 4 "four rctl rules"
     assert equal (lines-starting $log $"rctl -a jail:($name):vmemoryuse:deny=512m" | length) 1 "address-space cap alongside memoryuse"
     assert ((lines-starting $log "rctl -a") | all {|l| $l | str contains $"jail:($name):"}) "rules scoped to jail"
@@ -321,7 +348,7 @@ do {
     assert ((lines-starting $log "mdo -i rmdir") | is-not-empty) "rmdir, not rm -rf"
     # order: create < exec < remove
     let idx = {|p| $log | enumerate | where {|e| $e.item | str starts-with $p} | first | get index }
-    assert ((do $idx "jail -c") < (do $idx "jexec")) "create before exec"
+    assert ((do $idx "jail -i -c") < (do $idx "jexec")) "create before exec"
     assert ((do $idx "jexec") < (do $idx "jail -r")) "exec before remove"
     assert (not ([(jr $tmp) $name] | path join | path exists)) "ephemeral dir gone"
 
@@ -331,7 +358,7 @@ do {
     assert ($conf | str contains "nullfs ro") "read-only base"
     assert (not ($conf | str contains "resolv.conf")) "no DNS without Network"
     assert (not ([$tmp "last.resolv.conf"] | path join | path exists)) "no resolv.conf snapshot without Network"
-    ^rm -rf $tmp
+    retain-case $tmp; ^rm -rf $tmp
 }
 
 print "test 13: Network capability → inherit; failing command → fail with teardown"
@@ -348,7 +375,7 @@ do {
     assert ($conf | str contains 'ip4 = "inherit";')
     assert (not ($conf | str contains "resolv.conf")) "no placeholder in the base → warn, no mount"
     assert equal (lines-starting (mock-log $tmp) "jail -r" | length) 1
-    ^rm -rf $tmp
+    retain-case $tmp; ^rm -rf $tmp
 }
 
 print "test 14: timeout(1) expiry stops the task and still tears down"
@@ -364,7 +391,7 @@ do {
     assert equal ($r.outputs | first | get exit_code) 124
     assert ($r.error | str contains "task timeout") $"error: ($r.error)"
     assert equal (lines-starting (mock-log $tmp) "jail -r" | length) 1 "destroyed on timeout"
-    ^rm -rf $tmp
+    retain-case $tmp; ^rm -rf $tmp
 }
 
 print "test 15: whole-task deadline skips remaining commands"
@@ -381,10 +408,10 @@ do {
     assert ($r.error | str contains "budget exhausted") $"error: ($r.error)"
     assert (not ((mock-log $tmp) | any {|l| $l | str contains "echo never"})) "second command never ran"
     assert equal (lines-starting (mock-log $tmp) "jail -r" | length) 1
-    ^rm -rf $tmp
+    retain-case $tmp; ^rm -rf $tmp
 }
 
-print "test 16: jail -c failure → fail, no exec, dir cleaned, no jail -r"
+print "test 16: jail -i -c failure → fail, no exec, unknown acquisition retained, no jail -r"
 do {
     if $is_root { print "  (skipped as root)"; return }
     let tmp = make-temp-dir
@@ -397,8 +424,10 @@ do {
     let log = mock-log $tmp
     assert equal (lines-starting $log "jexec" | length) 0
     assert equal (lines-starting $log "jail -r" | length) 0
-    assert (not ([(jr $tmp) "sf_t_cfail_000004"] | path join | path exists))
-    ^rm -rf $tmp
+    assert ([(jr $tmp) "sf_t_cfail_000004"] | path join | path exists) "failed create does not prove absence"
+    assert (not $r.cleanup.retired)
+    assert ($r.cleanup.retained.conf | path exists) "configuration retained"
+    retain-case $tmp; ^rm -rf $tmp
 }
 
 print "test 17: rctl unavailable → warn and run; --require-limits → refuse + teardown"
@@ -411,7 +440,7 @@ do {
     }
     assert equal $r.verdict "pass"
     assert equal (lines-starting (mock-log $tmp) "rctl" | length) 0 "no rctl calls"
-    ^rm -rf $tmp
+    retain-case $tmp; ^rm -rf $tmp
 
     let tmp2 = make-temp-dir
     let bin2 = make-stubs $tmp2
@@ -423,7 +452,7 @@ do {
     let log2 = mock-log $tmp2
     assert equal (lines-starting $log2 "jexec" | length) 0 "nothing ran unlimited"
     assert equal (lines-starting $log2 "jail -r" | length) 1 "created jail destroyed"
-    ^rm -rf $tmp2
+    retain-case $tmp2; ^rm -rf $tmp2
 }
 
 print "test 18: failed teardown turns a passing run into fail (fail loud)"
@@ -435,9 +464,11 @@ do {
         run-jail-task "t-leak" ["echo ok"] --base "/b" --jail-root (jr $tmp) --salt "000007" --os freebsd
     }
     assert equal $r.verdict "fail"
-    assert ($r.error | str contains "jail -r failed")
-    assert equal (lines-starting (mock-log $tmp) "umount -f" | length) 3 "force-unmount dev, tmp, base"
-    ^rm -rf $tmp
+    assert ($r.error | str contains "jail removal failed")
+    assert equal (lines-starting (mock-log $tmp) "umount -f" | length) 0 "unresolved jail must not be force-unmounted"
+    assert (not $r.cleanup.retired)
+    assert ($r.cleanup.retained.conf | path exists) "failed teardown retains config"
+    retain-case $tmp; ^rm -rf $tmp
 }
 
 print "test 19: zfs clone backend"
@@ -453,10 +484,10 @@ do {
     let clone = lines-starting $log "zfs clone" | first
     assert ($clone | str contains $"mountpoint=(jr $tmp)/sf_t_zfs_000008") "mounted at jail path"
     assert ($clone | str ends-with "zroot/smolfire/base@clean zroot/smolfire/sf_t_zfs_000008") "clone target"
-    assert equal (lines-starting $log "zfs destroy -f zroot/smolfire/sf_t_zfs_000008" | length) 1 "ephemeral dataset destroyed"
+    assert equal (lines-starting $log "zfs destroy zroot/smolfire/sf_t_zfs_000008" | length) 1 "ephemeral dataset destroyed"
     assert (not ((open --raw ([$tmp "last.conf"] | path join)) | str contains "nullfs"))
     assert equal (lines-starting $log "install" | length) 0 "no resolv.conf without Network"
-    ^rm -rf $tmp
+    retain-case $tmp; ^rm -rf $tmp
 }
 
 print "test 20: OCI backend via podman + ocijail"
@@ -467,15 +498,15 @@ do {
     let r = with-stubs $tmp $bin {} {
         run-jail-task "t-oci" ["echo oci"] --image "ghcr.io/freebsd/freebsd-runtime:15.0" --salt "000009" --os freebsd
     }
-    assert equal $r.verdict "pass"
+    assert equal $r.verdict "pass" $"verdict: ($r | to nuon)"
     assert equal ($r.outputs | first | get stdout) "oci"
     let log = mock-log $tmp
     let run = lines-starting $log "podman run" | first
     assert ($run | str contains "--runtime ocijail --network none --read-only") $"run: ($run)"
     assert equal (lines-starting $log "podman exec sf_t_oci_000009" | length) 1
-    assert equal (lines-starting $log "podman rm --force --time 0 sf_t_oci_000009" | length) 1 "container removed"
+    assert equal (lines-starting $log "podman rm --force --time 0 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" | length) 1 "container removed"
     assert equal (lines-starting $log "jail " | length) 0 "no jail(8) calls on OCI path"
-    ^rm -rf $tmp
+    retain-case $tmp; ^rm -rf $tmp
 }
 
 print "test 21: non-root without mdo(1) → refuse before touching anything"
@@ -483,7 +514,7 @@ do {
     if $is_root { print "  (skipped as root)"; return }
     let tmp = make-temp-dir
     let bin = make-stubs $tmp --no-mdo
-    if ((with-stubs $tmp $bin {} { which mdo }) | is-not-empty) { print "  (skipped: a real mdo is on PATH)"; ^rm -rf $tmp; return }
+    if ((with-stubs $tmp $bin {} { which mdo }) | is-not-empty) { print "  (skipped: a real mdo is on PATH)"; retain-case $tmp; ^rm -rf $tmp; return }
     let r = with-stubs $tmp $bin {} {
         run-jail-task "t-nomdo" ["echo x"] --base "/b" --jail-root (jr $tmp) --os freebsd
     }
@@ -493,7 +524,7 @@ do {
     # before the privilege check and is expected; nothing state-changing is.
     let side_effects = mock-log $tmp | where {|l| not ($l | str starts-with "freebsd-version") and not ($l | str starts-with "sysctl") }
     assert equal $side_effects [] "no jail/rctl/zfs/podman/mdo call, only read-only preflight probes"
-    ^rm -rf $tmp
+    retain-case $tmp; ^rm -rf $tmp
 }
 
 print "test 28: resolv.conf plan (Network DNS)"
@@ -516,7 +547,7 @@ do {
     mkdir ([$lbase "etc"] | path join)
     ^ln -s /etc/hosts ([$lbase "etc" "resolv.conf"] | path join)
     assert ((resolv-plan nullfs $lbase $src).error | str contains "placeholder") "symlinked placeholder refused"
-    ^rm -rf $tmp
+    retain-case $tmp; ^rm -rf $tmp
 }
 
 print "test 29: Network task gets a resolv.conf snapshot; nullfs mounts it, zfs installs it"
@@ -537,7 +568,7 @@ do {
     let path = [(jr $tmp) "sf_t_dns_00000a"] | path join
     assert ($conf | str contains $"/resolv.conf ($path)/etc/resolv.conf nullfs ro 0 0") $"resolv mount: ($conf)"
     assert equal (open --raw ([$tmp "last.resolv.conf"] | path join)) "nameserver 192.0.2.53\n" "snapshot of the host file"
-    ^rm -rf $tmp
+    retain-case $tmp; ^rm -rf $tmp
 
     let tmp2 = make-temp-dir
     let bin2 = make-stubs $tmp2
@@ -553,9 +584,9 @@ do {
     assert ($inst | first | str ends-with $"(jr $tmp2)/sf_t_zdns_00000b/etc/resolv.conf") "target is the clone's /etc"
     let idx = {|p| $log2 | enumerate | where {|e| $e.item | str starts-with $p} | first | get index }
     assert ((do $idx "zfs clone") < (do $idx "install")) "after the clone"
-    assert ((do $idx "install") < (do $idx "jail -c")) "before the jail starts"
+    assert ((do $idx "install") < (do $idx "jail -i -c")) "before the jail starts"
     assert (not ((open --raw ([$tmp2 "last.conf"] | path join)) | str contains "resolv.conf")) "no mount for zfs"
-    ^rm -rf $tmp2
+    retain-case $tmp2; ^rm -rf $tmp2
 }
 
 # ── FreeBSD-SA-26:59.mac_do (CVE-2026-58092) hardening ────────────────────────
@@ -630,7 +661,7 @@ do {
     }
     assert equal $ok.verdict "pass" $"patched host runs clean: ($ok | to nuon)"
     assert (not ("warnings" in ($ok | columns))) "no warnings on a clean, patched host"
-    ^rm -rf $tmp
+    retain-case $tmp; ^rm -rf $tmp
 
     # unpatched, no override → refused before anything runs (exit 2 via result-exit)
     let tmp2 = make-temp-dir
@@ -644,7 +675,7 @@ do {
     assert equal (result-exit $refused) 2 "refusal maps to exit 2"
     assert equal ((mock-log $tmp2) | where {|l| $l | str starts-with "jail "} | length) 0 "no jail was ever created"
     assert (not ((jr $tmp2) | path exists)) "no jail-root dir created"
-    ^rm -rf $tmp2
+    retain-case $tmp2; ^rm -rf $tmp2
 
     # unpatched, --allow-unpatched → proceeds, warning surfaces in the record
     let tmp3 = make-temp-dir
@@ -656,7 +687,7 @@ do {
     assert ("warnings" in ($overridden | columns)) "override surfaces a warning"
     assert (($overridden.warnings | any {|w| $w | str contains "15.0-RELEASE-p5"})) $"warning names the version: ($overridden.warnings)"
     assert equal (result-exit $overridden) 0 "override still exits 0"
-    ^rm -rf $tmp3
+    retain-case $tmp3; ^rm -rf $tmp3
 }
 
 print "test 34: gid-less mac_do rule warns, does not refuse"
@@ -673,7 +704,7 @@ do {
     assert (($r.warnings | any {|w| $w | str contains "gid="})) $"names the gap: ($r.warnings)"
     assert (($r.warnings | any {|w| $w | str contains "uid=1001>uid=0"})) "names the offending rule"
     assert (($r.warnings | any {|w| $w | str contains "SA-26:59"})) "cites the advisory"
-    ^rm -rf $tmp
+    retain-case $tmp; ^rm -rf $tmp
 
     # a rule that already names gid= (the default stub value) produces no warning
     let tmp2 = make-temp-dir
@@ -683,7 +714,7 @@ do {
     }
     assert equal $clean.verdict "pass"
     assert (not ("warnings" in ($clean | columns))) "no warning when every rule names gid="
-    ^rm -rf $tmp2
+    retain-case $tmp2; ^rm -rf $tmp2
 }
 
 # ── agent-jail additions ──────────────────────────────────────────────────────
@@ -719,6 +750,226 @@ do {
     assert equal $c ((executor-contract) | to json | from json) "CLI == module"
     let usage = ^nu bin/jail-execute.nu | complete
     assert (not ($usage.stdout | str contains "dispatch")) "mbox dispatch stays in smolfire's adapter"
+}
+
+
+# These controls invoke the real executor/finalizer. Only native commands are
+# modeled; file faults wrap the real lifecycle-io implementation.
+print "test 37: configuration write exception cleans only owned pre-jail resources"
+do {
+    let tmp = make-temp-dir
+    let bin = make-stubs $tmp
+    let fail_write = {|q| if $q.kind == write { error make {msg:'injected configuration write failure'} }; lifecycle-io $q }
+    let r = with-stubs $tmp $bin {} { run-jail-task fault ["true"] --base /b --jail-root (jr $tmp) --salt abcdef --os freebsd --io $fail_write }
+    $r | to json | save ($tmp | path join result.json)
+    assert equal $r.verdict fail
+    assert ($r.error | str contains 'injected configuration write failure')
+    assert $r.cleanup.retired
+    assert equal (lines-starting (mock-log $tmp) 'jail -i -c' | length) 0
+    let directory_events = ($r.cleanup.events | where stage == remove | where kind == directory)
+    assert equal ($directory_events | length) 1
+    assert equal $directory_events.0.result.exit_code 0
+    assert (not (jr $tmp | path join sf_fault_abcdef | path exists)) "owned directory actually absent"
+    retain-case $tmp; ^rm -rf $tmp
+}
+
+print "test 38: write exception after clone retires the observed dataset"
+do {
+    let tmp = make-temp-dir
+    let bin = make-stubs $tmp
+    let fail_write = {|q| if $q.kind == write { error make {msg:'injected configuration write failure'} }; lifecycle-io $q }
+    let r = with-stubs $tmp $bin {} { run-jail-task fault ["true"] --zfs-snapshot zroot/base@clean --jail-root (jr $tmp) --salt abcdef --os freebsd --io $fail_write }
+    $r | to json | save ($tmp | path join result.json)
+    assert equal $r.verdict fail
+    assert $r.cleanup.retired
+    assert equal (lines-starting (mock-log $tmp) 'zfs destroy zroot/sf_fault_abcdef' | length) 1
+    assert equal (lines-starting (mock-log $tmp) 'jail -i -c' | length) 0
+    retain-case $tmp; ^rm -rf $tmp
+}
+
+print "test 39: unconfirmed or different create identity retains resources"
+do {
+    for extra in [{MOCK_IDENTITY_FAIL:'1'} {MOCK_IDENTITY_CHANGE:'1'}] {
+        let tmp = make-temp-dir
+        let bin = make-stubs $tmp
+        let r = with-stubs $tmp $bin $extra { run-jail-task fault ["true"] --base /b --jail-root (jr $tmp) --salt abcdef --os freebsd }
+        $r | to json | save ($tmp | path join result.json)
+        assert equal $r.verdict fail
+        if 'MOCK_IDENTITY_CHANGE' in $extra {
+            assert equal $r.error 'jail create JID differs from observed identity; jail acquisition outcome unknown; resources retained' 'specific mismatch, not arbitrary failure'
+            let acknowledged = ($r.cleanup.retained.acquisition | where kind == jail | first)
+            assert equal $acknowledged.result.exit_code 0
+            assert equal ($acknowledged.result.stdout | str trim) '42'
+            let observed = (open ($tmp | path join jls-observation.json) | get jail-information.jail)
+            assert equal ($observed | length) 1
+            assert equal $observed.0.jid 43
+            assert equal $observed.0.name sf_fault_abcdef
+            assert equal $observed.0.path (jr $tmp | path join sf_fault_abcdef)
+        } else {
+            assert equal $r.error 'jail inventory failed: inventory failed; jail acquisition outcome unknown; resources retained' 'specific failed inventory'
+        }
+
+        assert equal ($r.outputs | length) 0
+        assert (not $r.cleanup.retired)
+        assert $r.cleanup.retained.create_attempted
+        assert ($r.cleanup.retained.conf | path exists)
+        assert equal (lines-starting (mock-log $tmp) 'jail -r' | length) 0
+        let directory_events = ($r.cleanup.events | where stage == remove | where kind == directory)
+        assert equal ($directory_events | length) 0
+        assert (jr $tmp | path join sf_fault_abcdef | path exists) "unretired or preexisting directory preserved"
+        retain-case $tmp; ^rm -rf $tmp
+    }
+}
+
+print "test 40: nonzero clone and container acquisition are not absence proofs"
+do {
+    for backend in [zfs podman] {
+        let tmp = make-temp-dir
+        let bin = make-stubs $tmp
+        let r = if $backend == zfs {
+            with-stubs $tmp $bin {MOCK_CLONE_FAIL:'1'} { run-jail-task fault ["true"] --zfs-snapshot zroot/base@clean --jail-root (jr $tmp) --salt abcdef --os freebsd }
+        } else {
+            with-stubs $tmp $bin {MOCK_PODMAN_FAIL:'1'} { run-jail-task fault ["true"] --image img:1 --jail-root (jr $tmp) --salt abcdef --os freebsd }
+        }
+        $r | to json | save ($tmp | path join result.json)
+        assert equal $r.verdict fail
+        assert equal ($r.outputs | length) 0
+        assert (not $r.cleanup.retired)
+        assert ($r.cleanup.retained.conf_dir | path exists)
+        assert equal (lines-starting (mock-log $tmp) 'zfs destroy' | length) 0
+        assert equal (lines-starting (mock-log $tmp) 'podman rm' | length) 0
+        assert equal $r.cleanup.retained.acquisition.0.result.exit_code 1
+        retain-case $tmp; ^rm -rf $tmp
+    }
+}
+
+print "test 41: failed jail retirement prevents dataset destruction and limit removal"
+do {
+    let tmp = make-temp-dir
+    let bin = make-stubs $tmp
+    let r = with-stubs $tmp $bin {MOCK_JAIL_REMOVE_FAIL:'1'} { run-jail-task fault ["true"] --zfs-snapshot zroot/base@clean --jail-root (jr $tmp) --salt abcdef --os freebsd }
+    $r | to json | save ($tmp | path join result.json)
+    assert equal $r.verdict fail
+    assert equal $r.outputs.0.exit_code 0
+    assert (not $r.cleanup.retired)
+    assert equal (lines-starting (mock-log $tmp) 'zfs destroy' | length) 0
+    assert equal (lines-starting (mock-log $tmp) 'rctl -r' | length) 0
+    assert ($r.cleanup.retained.conf | path exists)
+    retain-case $tmp; ^rm -rf $tmp
+}
+
+print "test 42: configuration removal exception remains visible after native retirement"
+do {
+    let tmp = make-temp-dir
+    let bin = make-stubs $tmp
+    let fail_remove = {|q| if $q.kind == remove_config { error make {msg:'injected configuration removal failure'} }; lifecycle-io $q }
+    let r = with-stubs $tmp $bin {} { run-jail-task fault ["true"] --base /b --jail-root (jr $tmp) --salt abcdef --os freebsd --io $fail_remove }
+    $r | to json | save ($tmp | path join result.json)
+    assert equal $r.verdict fail
+    assert ($r.error | str contains 'injected configuration removal failure')
+    assert (not $r.cleanup.retired)
+    assert equal (lines-starting (mock-log $tmp) 'jail -r' | length) 1
+    let directory_events = ($r.cleanup.events | where stage == remove | where kind == directory)
+    assert equal ($directory_events | length) 1
+    assert equal $directory_events.0.result.exit_code 0
+    assert (not (jr $tmp | path join sf_fault_abcdef | path exists)) "owned directory actually absent"
+    assert ($r.cleanup.retained.conf | path exists)
+    retain-case $tmp; ^rm -rf $tmp
+}
+
+print "test 43: residual owned mount prevents storage and config removal"
+do {
+    let tmp = make-temp-dir
+    let bin = make-stubs $tmp
+    let r = with-stubs $tmp $bin {MOCK_MOUNT_REMAINS:'1'} { run-jail-task fault ["true"] --base /b --jail-root (jr $tmp) --salt abcdef --os freebsd }
+    $r | to json | save ($tmp | path join result.json)
+    assert equal $r.verdict fail
+    assert ($r.error | str contains 'owned jail mount remains')
+    assert (not $r.cleanup.retired)
+    let directory_events = ($r.cleanup.events | where stage == remove | where kind == directory)
+    assert equal ($directory_events | length) 0
+    assert (jr $tmp | path join sf_fault_abcdef | path exists) "unretired or preexisting directory preserved"
+    assert ($r.cleanup.retained.conf | path exists)
+    retain-case $tmp; ^rm -rf $tmp
+}
+
+
+print "test 44: DNS read exception after clone uses latest acquisition state"
+do {
+    let tmp = make-temp-dir
+    let bin = make-stubs $tmp
+    let src = ($tmp | path join host-resolv.conf)
+    "nameserver 192.0.2.53\n" | save $src
+    let fail_read = {|q| if $q.kind == read { error make {msg:'injected DNS read failure'} }; lifecycle-io $q }
+    let r = with-stubs $tmp $bin {} { run-jail-task fault ["true"] --zfs-snapshot zroot/base@clean --network --resolv-conf $src --jail-root (jr $tmp) --salt abcdef --os freebsd --io $fail_read }
+    $r | to json | save ($tmp | path join result.json)
+    assert equal $r.verdict fail
+    assert ($r.error | str contains 'injected DNS read failure')
+    assert $r.cleanup.retired
+    assert equal (lines-starting (mock-log $tmp) 'zfs destroy zroot/sf_fault_abcdef' | length) 1
+    assert equal ($r.outputs | length) 0
+    retain-case $tmp; ^rm -rf $tmp
+}
+
+print "test 45: failed dataset and container removal retain exact result and configuration"
+do {
+    for backend in [zfs podman] {
+        let tmp = make-temp-dir
+        let bin = make-stubs $tmp
+        let r = if $backend == zfs {
+            with-stubs $tmp $bin {MOCK_DESTROY_FAIL:'1'} { run-jail-task fault ["true"] --zfs-snapshot zroot/base@clean --jail-root (jr $tmp) --salt abcdef --os freebsd }
+        } else {
+            with-stubs $tmp $bin {MOCK_PODMAN_REMOVE_FAIL:'1'} { run-jail-task fault ["true"] --image img:1 --jail-root (jr $tmp) --salt abcdef --os freebsd }
+        }
+        $r | to json | save ($tmp | path join result.json)
+        assert equal $r.verdict fail
+        assert equal $r.outputs.0.exit_code 0
+        assert (not $r.cleanup.retired)
+        let removal = ($r.cleanup.events | where stage == remove | where kind == $backend)
+        assert equal ($removal | length) 1
+        assert equal $removal.0.result.exit_code 1
+        assert ($r.cleanup.retained.conf_dir | path exists)
+        retain-case $tmp; ^rm -rf $tmp
+    }
+}
+
+print "test 46: existing nullfs directory is not adopted or deleted"
+do {
+    let tmp = make-temp-dir
+    let bin = make-stubs $tmp
+    let existing = (jr $tmp | path join sf_fault_abcdef)
+    mkdir $existing
+    'unchanged' | save ($existing | path join sentinel)
+    let r = with-stubs $tmp $bin {} { run-jail-task fault ["true"] --base /b --jail-root (jr $tmp) --salt abcdef --os freebsd }
+    $r | to json | save ($tmp | path join result.json)
+    assert equal $r.verdict fail
+    assert equal (open --raw ($existing | path join sentinel)) unchanged
+    assert equal (lines-starting (mock-log $tmp) 'jail -i -c' | length) 0
+    let directory_events = ($r.cleanup.events | where stage == remove | where kind == directory)
+    assert equal ($directory_events | length) 0
+    assert (jr $tmp | path join sf_fault_abcdef | path exists) "unretired or preexisting directory preserved"
+    retain-case $tmp; ^rm -rf $tmp
+}
+
+
+print "test 47: partial rctl addition is removed only after jail retirement"
+do {
+    for remove_failure in ['0' '1'] {
+        let tmp = make-temp-dir
+        let bin = make-stubs $tmp
+        let r = with-stubs $tmp $bin {MOCK_RCTL_ADD_FAIL:'1',MOCK_RCTL_REMOVE_FAIL:$remove_failure} { run-jail-task fault ["true"] --base /b --jail-root (jr $tmp) --salt abcdef --os freebsd }
+        $r | to json | save ($tmp | path join result.json)
+        assert equal $r.verdict fail
+        assert equal ($r.outputs | length) 0
+        assert equal (lines-starting (mock-log $tmp) 'rctl -r' | length) 1
+        assert equal $r.cleanup.retired ($remove_failure == '0')
+        if $remove_failure == '1' {
+            assert ($r.cleanup.retained.conf | path exists)
+            let removal = ($r.cleanup.events | where kind == rctl | first)
+            assert equal $removal.result.exit_code 1
+        }
+        retain-case $tmp; ^rm -rf $tmp
+    }
 }
 
 print "all tests passed"

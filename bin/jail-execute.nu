@@ -442,45 +442,153 @@ def read-mac-do-rules [] {
     if $r.exit_code == 0 { $r.stdout | str trim } else { "" }
 }
 
-# Tear everything down. Returns a list of error strings (empty = clean).
-def teardown [ctx: record] {
-    mut errs = []
-    if $ctx.backend == "podman" {
-        if $ctx.created {
-            let r = priv-run $ctx.prefix ["podman" "rm" "--force" "--time" "0" $ctx.name]
-            if $r.exit_code != 0 { $errs = $errs | append $"podman rm failed: ($r.stderr | str trim)" }
-        }
-        return $errs
+# Every inventory must complete successfully. A failed query is never absence.
+def lifecycle-inventory [prefix: list<string>, kind: string] {
+    let argv = match $kind {
+        jail => [jls --libxo json -a jid name path]
+        podman => [podman ps -a --no-trunc --format '{{.ID}}	{{.Names}}']
+        zfs => [zfs list -H -p -t filesystem -o name,guid,mountpoint]
+        mounts => [mount -p]
+        _ => { error make {msg:'unknown inventory kind'} }
     }
-
-    if $ctx.created {
-        let r = priv-run $ctx.prefix ["jail" "-r" "-f" $ctx.conf $ctx.name]
-        if $r.exit_code != 0 {
-            $errs = $errs | append $"jail -r failed: ($r.stderr | str trim)"
-            # jail(8) unmounts its `mount` entries on removal; if removal failed,
-            # force-unmount so the base is never left mounted under the jail dir.
-            let resolv_mp = if $ctx.resolv_mounted { [$"($ctx.path)/etc/resolv.conf"] } else { [] }
-            for mp in [...$resolv_mp $"($ctx.path)/dev" $"($ctx.path)/tmp" $ctx.path] {
-                let _ = priv-run $ctx.prefix ["umount" "-f" $mp]
+    let r = priv-run $prefix $argv
+    if $r.exit_code != 0 { error make {msg:$'($kind) inventory failed: ($r.stderr | str trim)'} }
+    if $kind == jail {
+        let value = ($r.stdout | from json --strict)
+        let container = ($value | get jail-information)
+        let rows = ($container | get jail)
+        if not ($container | describe | str starts-with 'record') or not (($rows | describe | str starts-with 'list') or ($rows | describe | str starts-with 'table')) { error make {msg:'invalid jail inventory'} }
+        $rows | each {|row|
+            let id = ($row.jid | into string)
+            if $id !~ '^[1-9][0-9]*$' or not (($row.name | describe) == string) or not (($row.path | describe) == string) { error make {msg:'invalid jail identity'} }
+            {id:$id,name:$row.name,path:$row.path}
+        }
+    } else {
+        $r.stdout | lines | where {|line| ($line | str trim) != ''} | each {|line|
+            if $kind == mounts {
+                let fields = ($line | split row -r '\s+' | where {|v| $v != ''})
+                if ($fields | length) != 6 { error make {msg:'invalid mount inventory'} }
+                {path:$fields.1,source:$fields.0,type:$fields.2}
+            } else {
+                let fields = ($line | split row "\t")
+                if $kind == podman {
+                    if ($fields | length) != 2 or $fields.0 !~ '^[0-9a-f]{64}$' { error make {msg:'invalid container inventory'} }
+                    {id:$fields.0,name:$fields.1}
+                } else {
+                    if ($fields | length) != 3 or $fields.1 !~ '^[0-9]+$' { error make {msg:'invalid dataset inventory'} }
+                    {name:$fields.0,id:$fields.1,path:$fields.2}
+                }
             }
         }
     }
-    if $ctx.rctl_added {
-        let r = priv-run $ctx.prefix ["rctl" "-r" $"jail:($ctx.name)"]
-        if $r.exit_code != 0 { $errs = $errs | append $"rctl -r failed: ($r.stderr | str trim)" }
+}
+
+def lifecycle-identity [ctx: record, kind: string] {
+    let name = if $kind == zfs { $ctx.dataset } else { $ctx.name }
+    let rows = (lifecycle-inventory $ctx.prefix $kind | where name == $name)
+    if ($rows | length) != 1 { error make {msg:$'($kind) identity missing or ambiguous'} }
+    let row = $rows.0
+    if $kind != podman and $row.path != $ctx.path { error make {msg:$'($kind) path differs from owned path'} }
+    $row
+}
+
+# The callable seam is only on the exported library function, not on the CLI.
+# Tests may fail a real file operation; the CLI always selects this implementation.
+export def lifecycle-io [request: record] {
+    match $request.kind {
+        read => { open --raw $request.path }
+        write => { $request.bytes | save --force $request.path }
+        remove_config => { rm -rf $request.path }
+        _ => { error make {msg:'unknown lifecycle I/O request'} }
     }
-    if $ctx.backend == "zfs" and $ctx.cloned {
-        let r = priv-run $ctx.prefix ["zfs" "destroy" "-f" $ctx.dataset]
-        if $r.exit_code != 0 { $errs = $errs | append $"zfs destroy failed: ($r.stderr | str trim)" }
+}
+
+# Return structured evidence and preserve reconciliation files whenever any
+# resource remains uncertain. No forced unmount or recursive dataset destruction.
+def teardown [ctx: record, io: closure] {
+    mut errs = []
+    mut events = []
+    mut safe_storage = true
+    let kind = if $ctx.backend == podman { 'podman' } else { 'jail' }
+    if $ctx.create_attempted {
+        if not $ctx.created or $ctx.identity == null {
+            $errs = ($errs | append $'($kind) acquisition outcome unknown; resources retained')
+            $safe_storage = false
+        } else {
+            let observed = try { {ok:true,value:(lifecycle-identity $ctx $kind)} } catch {|e| {ok:false,error:$e.msg} }
+            if not $observed.ok or $observed.value? != $ctx.identity {
+                $errs = ($errs | append $'($kind) identity unavailable or changed; resources retained')
+                $events = ($events | append {stage:identity,kind:$kind,observation:$observed})
+                $safe_storage = false
+            } else {
+                let argv = if $kind == podman { [podman rm --force --time '0' $ctx.identity.id] } else { [jail -r -f $ctx.conf $ctx.name] }
+                let r = priv-run $ctx.prefix $argv
+                $events = ($events | append {stage:remove,kind:$kind,result:$r})
+                if $r.exit_code != 0 {
+                    $errs = ($errs | append $'($kind) removal failed: ($r.stderr | str trim)')
+                    $safe_storage = false
+                } else {
+                    let retired = try {
+                        let rows = (lifecycle-inventory $ctx.prefix $kind)
+                        let still = ($rows | where {|row| $row.id == $ctx.identity.id or $row.name == $ctx.name})
+                        if not ($still | is-empty) { error make {msg:'identity or reused name still present'} }
+                        if $kind == jail {
+                            let mounts = (lifecycle-inventory $ctx.prefix mounts | where {|row| $row.path == $ctx.path or ($row.path | str starts-with ($ctx.path + '/'))})
+                            if not ($mounts | is-empty) { error make {msg:'owned jail mount remains'} }
+                        }
+                        {ok:true}
+                    } catch {|e| {ok:false,error:$e.msg} }
+                    $events = ($events | append {stage:retirement,kind:$kind,observation:$retired})
+                    if not $retired.ok { $errs = ($errs | append $retired.error); $safe_storage = false }
+                }
+            }
+        }
     }
-    if $ctx.backend == "nullfs" and $ctx.dir_made {
-        # rmdir, never rm -rf: if the read-only base is somehow still
-        # nullfs-mounted here, rmdir fails loudly instead of recursing into it.
-        let r = priv-run $ctx.prefix ["rmdir" $ctx.path]
-        if $r.exit_code != 0 { $errs = $errs | append $"rmdir ($ctx.path) failed: ($r.stderr | str trim)" }
+    # Limits/storage must remain while jail/container retirement is unresolved.
+    if $ctx.rctl_added and $safe_storage {
+        let r = priv-run $ctx.prefix [rctl -r $'jail:($ctx.name)']
+        $events = ($events | append {stage:remove,kind:rctl,result:$r})
+        if $r.exit_code != 0 { $errs = ($errs | append $'rctl -r failed: ($r.stderr | str trim)') }
     }
-    if $ctx.conf_dir != "" { rm -rf $ctx.conf_dir }
-    $errs
+    if $ctx.backend == zfs and $ctx.clone_attempted {
+        if not $safe_storage or not $ctx.cloned or $ctx.dataset_identity == null {
+            $errs = ($errs | append 'dataset acquisition/retirement unknown; dataset retained')
+        } else {
+            let identity = try { {ok:true,value:(lifecycle-identity $ctx zfs)} } catch {|e| {ok:false,error:$e.msg} }
+            $events = ($events | append {stage:identity,kind:zfs,observation:$identity})
+            if not $identity.ok or $identity.value? != $ctx.dataset_identity {
+                $errs = ($errs | append 'dataset identity unavailable or changed; dataset retained')
+            } else {
+                let r = priv-run $ctx.prefix [zfs destroy $ctx.dataset]
+                $events = ($events | append {stage:remove,kind:zfs,result:$r})
+                if $r.exit_code != 0 {
+                    $errs = ($errs | append $'zfs destroy failed: ($r.stderr | str trim)')
+                } else {
+                    let removed = try {
+                        let left = (lifecycle-inventory $ctx.prefix zfs | where {|row| $row.id == $ctx.dataset_identity.id or $row.name == $ctx.dataset})
+                        if not ($left | is-empty) { error make {msg:'dataset retirement unconfirmed'} }
+                        {ok:true}
+                    } catch {|e| {ok:false,error:$e.msg} }
+                    $events = ($events | append {stage:retirement,kind:zfs,observation:$removed})
+                    if not $removed.ok { $errs = ($errs | append $removed.error) }
+                }
+            }
+        }
+    }
+    if $ctx.backend == nullfs and $ctx.directory_attempted and not $ctx.dir_made {
+        $errs = ($errs | append 'directory creation was not acknowledged; path/configuration retained')
+    }
+    if $ctx.backend == nullfs and $ctx.dir_made and $safe_storage {
+        let r = priv-run $ctx.prefix [rmdir $ctx.path]
+        $events = ($events | append {stage:remove,kind:directory,result:$r})
+        if $r.exit_code != 0 { $errs = ($errs | append $'rmdir ($ctx.path) failed: ($r.stderr | str trim)') }
+    }
+    if ($errs | is-empty) and $ctx.conf_dir != '' {
+        let cleared = try { do $io {kind:remove_config,path:$ctx.conf_dir}; {ok:true} } catch {|e| {ok:false,error:$e.msg} }
+        $events = ($events | append {stage:remove,kind:configuration,observation:$cleared})
+        if not $cleared.ok { $errs = ($errs | append $cleared.error) }
+    }
+    {errors:$errs,events:$events,retired:($errs | is-empty),retained:(if ($errs | is-empty) { null } else { $ctx })}
 }
 
 # ── Public: run a task in an ephemeral jail ───────────────────────────────────
@@ -507,6 +615,7 @@ export def run-jail-task [
     --salt:          string = ""       # name salt (tests); random when empty
     --os:            string = ""       # host OS override (tests); default $nu.os-info.name
     --allow-unpatched                  # skip the freebsd-version -k patch-floor refusal (not recommended)
+    --io: closure                      # library-only file-operation fault seam
 ] {
     let host_os = if $os == "" { $nu.os-info.name } else { $os }
     let hc = host-check $host_os
@@ -553,41 +662,65 @@ export def run-jail-task [
     let deadline = $t0 + ($budget * 1_000_000_000)
     let path = [$jail_root $name] | path join
 
-    mut ctx = {
+    mut ctx: any = {
         backend: $be.backend, name: $name, prefix: $prefix, path: $path,
         conf: "", conf_dir: "", dataset: "",
         created: false, rctl_added: false, cloned: false, dir_made: false,
-        resolv_mounted: false
+        resolv_mounted: false, directory_attempted: false, create_attempted: false, clone_attempted: false,
+        identity: null, dataset_identity: null, acquisition: []
     }
+    let file_io = if $io == null { {|request| lifecycle-io $request} } else { $io }
+    mut outputs = []
+    mut all_ok = true
+    mut run_error = ""
+    mut boot_sec = 0
     mut setup_error = ""
+    let operation = try {
+
+    # explicit XXXXXX template: portable across BSD and GNU mktemp
+    let temp = priv-run [] [mktemp -d (($env.TMPDIR? | default "/tmp") | path join "smolfire-jail.XXXXXXXX")]
+    if $temp.exit_code != 0 or ($temp.stdout | str trim) == "" { error make {msg:"private configuration directory creation failed"} }
+    let conf_dir = ($temp.stdout | str trim)
+    $ctx = $ctx | update conf_dir $conf_dir
+    let mode = priv-run [] [chmod 700 $conf_dir]
+    if $mode.exit_code != 0 { error make {msg:"private configuration directory mode failed"} }
+    let conf = [$conf_dir $"($name).conf"] | path join
+    $ctx = $ctx | update conf $conf | update conf_dir $conf_dir
 
     # ── setup ────────────────────────────────────────────────────────────────
     if $be.backend == "podman" {
         let argv = podman-run-args $name $image $budget --network=$network --memory $memory --maxproc $maxproc --pcpu $pcpu --tmpfs-size $tmpfs_size
+        $ctx = $ctx | update create_attempted true
         let r = priv-run $prefix $argv
+        $ctx = $ctx | update acquisition ($ctx.acquisition | append {kind:podman,result:$r})
         if $r.exit_code == 0 {
             $ctx = $ctx | update created true
+            let identity = lifecycle-identity $ctx podman
+            if ($r.stdout | str trim) != $identity.id { error make {msg:"container create ID differs from observed identity"} }
+            $ctx = $ctx | update identity $identity
         } else {
             $setup_error = $"podman run failed: ($r.stderr | str trim)"
         }
     } else {
-        # explicit XXXXXX template: portable across BSD and GNU mktemp
-        let conf_dir = ^mktemp -d (($env.TMPDIR? | default "/tmp") | path join "smolfire-jail.XXXXXXXX") | str trim
-        ^chmod 700 $conf_dir
-        let conf = [$conf_dir $"($name).conf"] | path join
-        $ctx = $ctx | update conf $conf | update conf_dir $conf_dir
 
         if $be.backend == "zfs" {
             let ds = zfs-clone-dataset $zfs_snapshot $name
-            $ctx = $ctx | update dataset $ds
+            $ctx = $ctx | update dataset $ds | update clone_attempted true
             let r = priv-run $prefix ["zfs" "clone" "-o" $"mountpoint=($path)" "-o" "setuid=off" $zfs_snapshot $ds]
+            $ctx = $ctx | update acquisition ($ctx.acquisition | append {kind:zfs,result:$r})
             if $r.exit_code == 0 {
                 $ctx = $ctx | update cloned true
+                let identity = lifecycle-identity $ctx zfs
+                $ctx = $ctx | update dataset_identity $identity
             } else {
                 $setup_error = $"zfs clone failed: ($r.stderr | str trim)"
             }
         } else {
-            let r = priv-run $prefix ["mkdir" "-p" "-m" "0755" $path]
+            let parent = priv-run $prefix ["mkdir" "-p" $jail_root]
+            if $parent.exit_code != 0 { error make {msg:"jail root creation failed"} }
+            $ctx = $ctx | update directory_attempted true
+            let r = priv-run $prefix ["mkdir" "-m" "0755" $path]
+            $ctx = $ctx | update acquisition ($ctx.acquisition | append {kind:directory,result:$r})
             if $r.exit_code == 0 {
                 $ctx = $ctx | update dir_made true
             } else {
@@ -605,8 +738,10 @@ export def run-jail-task [
                 diag "jail_dns_unavailable" {task_id: $task_id, jail: $name, reason: $dns.error}
             } else {
                 let snap = [$conf_dir "resolv.conf"] | path join
-                open --raw ($resolv_conf | path expand) | save --force $snap
-                ^chmod 644 $snap
+                let bytes = do $file_io {kind:read,path:($resolv_conf | path expand)}
+                do $file_io {kind:write,path:$snap,bytes:$bytes}
+                let mode = priv-run [] [chmod 644 $snap]
+                if $mode.exit_code != 0 { error make {msg:"DNS snapshot mode failed"} }
                 if $be.backend == "zfs" {
                     # install(1) writes a temp file and renames it, so it never
                     # follows a symlink at the target
@@ -625,12 +760,16 @@ export def run-jail-task [
             let use_mdo = ($prefix | length) > 0
             let mac_do_off = $use_mdo or (mac-do-loaded)
             let rendered = render-jail-conf $name $path --backend $be.backend --base $base --network=$network --tmpfs-size $tmpfs_size --mac-do-disable=$mac_do_off --resolv-conf $resolv_mount
-            $rendered | save --force $conf
-            let r = priv-run $prefix ["jail" "-c" "-f" $conf $name]
+            do $file_io {kind:write,path:$conf,bytes:$rendered}
+            $ctx = $ctx | update create_attempted true
+            let r = priv-run $prefix ["jail" "-i" "-c" "-f" $conf $name]
+            $ctx = $ctx | update acquisition ($ctx.acquisition | append {kind:jail,result:$r})
             if $r.exit_code == 0 {
                 $ctx = $ctx | update created true
+                let identity = lifecycle-identity $ctx jail
+                if ($r.stdout | str trim) != $identity.id { error make {msg:"jail create JID differs from observed identity"} }
+                $ctx = $ctx | update identity $identity
             } else {
-                $ctx = $ctx | update resolv_mounted false
                 $setup_error = $"jail -c failed: ($r.stderr | str trim)"
             }
         }
@@ -639,8 +778,9 @@ export def run-jail-task [
             if (racct-enabled) {
                 mut rctl_err = ""
                 for rule in (rctl-rules $name $memory $maxproc $pcpu --vmemory $vmemory) {
-                    let r = priv-run $prefix ["rctl" "-a" $rule]
                     $ctx = $ctx | update rctl_added true
+                    let r = priv-run $prefix ["rctl" "-a" $rule]
+                    $ctx = $ctx | update acquisition ($ctx.acquisition | append {kind:rctl,rule:$rule,result:$r})
                     if $r.exit_code != 0 { $rctl_err = $"rctl -a ($rule) failed: ($r.stderr | str trim)"; break }
                 }
                 if $rctl_err != "" { $setup_error = $rctl_err }
@@ -652,18 +792,9 @@ export def run-jail-task [
         }
     }
 
-    let boot_sec = ((now-ns) - $t0) // 1_000_000_000
+    $boot_sec = ((now-ns) - $t0) // 1_000_000_000
+    if $setup_error != "" { error make {msg:$setup_error} }
 
-    if $setup_error != "" {
-        let errs = teardown $ctx
-        let msg = [$setup_error ...$errs] | str join "; "
-        return (attach-warnings (result-record "fail" $boot_sec [] $msg) $warnings)
-    }
-
-    # ── run ──────────────────────────────────────────────────────────────────
-    mut outputs = []
-    mut all_ok = true
-    mut run_error = ""
     for cmd in $commands {
         let rem = remaining-sec $deadline (now-ns)
         if $rem <= 0 {
@@ -685,11 +816,20 @@ export def run-jail-task [
         }
     }
 
-    # ── teardown (always) ────────────────────────────────────────────────────
-    let errs = teardown $ctx
-    let all_errors = [$run_error ...$errs] | where {|e| $e != ""}
-    let verdict = if $all_ok and ($errs | is-empty) { "pass" } else { "fail" }
-    attach-warnings (result-record $verdict $boot_sec $outputs ($all_errors | str join "; ")) $warnings
+    {ok:true}
+    } catch {|e| {ok:false,error:($e.msg? | default 'lifecycle operation failed')} }
+
+    # Assemble the exception from the latest state, outside the catch closure.
+    let latest = $ctx
+    let cleanup = try { teardown $latest $file_io } catch {|e|
+        {errors:[($e.msg? | default 'cleanup outcome unknown')],events:[],retired:false,retained:$latest}
+    }
+    let failure = if $operation.ok { $run_error } else { $operation.error }
+    let all_errors = [$failure ...$cleanup.errors] | where {|e| $e != ""}
+    let verdict = if $operation.ok and $all_ok and $cleanup.retired { "pass" } else { "fail" }
+    let result = result-record $verdict $boot_sec $outputs ($all_errors | str join "; ")
+    attach-warnings ($result | insert cleanup $cleanup) $warnings
+
 }
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -747,7 +887,7 @@ export def executor-contract [] {
         ]
         result: {
             required: {verdict: "pass | fail", boot_sec: "int (jail setup seconds)", outputs: "list<{cmd, stdout, stderr, exit_code}>"}
-            optional: {error: "string, present only when non-empty", warnings: "list<string>, present only when non-empty"}
+            optional: {error: "string, present only when non-empty", warnings: "list<string>, present only when non-empty", cleanup: "attempted lifecycle only: observed events, retired flag, retained latest context on uncertainty"}
         }
         exit_codes: {"0": "pass", "1": "fail", "2": "refused (non-FreeBSD host, or below patch floor without --allow-unpatched)"}
         limits: {
