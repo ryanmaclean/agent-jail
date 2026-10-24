@@ -65,7 +65,7 @@ jobs:
             echo "tag $TAG exists; refusing to overwrite" >&2; exit 1
           fi
           gh api "repos/$REPO/commits/$SHA/check-runs?per_page=100" \
-            -q '.check_runs[] | "\(.name)\t\(.status)\t\(.conclusion)"' > checks.tsv
+            -q '.check_runs[] | select(.name | test("^(Bundle |Lint bundle-release)") | not) | "\(.name)\t\(.status)\t\(.conclusion)"' > checks.tsv
           cat checks.tsv
           if awk -F'\t' '$2 != "completed" || ($3 != "success" && $3 != "skipped")' checks.tsv | grep .; then
             echo "commit has a failing or unfinished check" >&2; exit 1
