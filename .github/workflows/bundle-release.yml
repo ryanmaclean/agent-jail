@@ -70,7 +70,7 @@ jobs:
           if awk -F'\t' '$2 != "completed" || ($3 != "success" && $3 != "skipped")' checks.tsv | grep .; then
             echo "commit has a failing or unfinished check" >&2; exit 1
           fi
-          wc -l < checks.tsv | tr -d ' ' > nchecks
+          wc -l < checks.tsv | tr -d ' ' > "$RUNNER_TEMP/nchecks"
 
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -86,7 +86,7 @@ jobs:
           git archive --format=tar --prefix="$name/" "$SHA" | gzip -n -9 > "out/$name.tar.gz"
           ( cd out && sha256sum "$name.tar.gz" > SHA256SUMS )
           printf '{"repo":"%s","commit":"%s","kind":"source bundle (Nushell executor, no compiled artifact)","check_runs_on_commit":%s,"build_host":"github-hosted ubuntu-latest runner","toolchain":"%s; %s","built_at_utc":"%s","run_url":"%s/%s/actions/runs/%s"}\n' \
-            "$REPO" "$SHA" "$(cat nchecks)" "$(git --version)" "$(gzip --version | head -n 1)" \
+            "$REPO" "$SHA" "$(cat "$RUNNER_TEMP/nchecks")" "$(git --version)" "$(gzip --version | head -n 1)" \
             "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$GITHUB_SERVER_URL" "$REPO" "$GITHUB_RUN_ID" > out/PROVENANCE.json
           cat out/PROVENANCE.json out/SHA256SUMS
 
