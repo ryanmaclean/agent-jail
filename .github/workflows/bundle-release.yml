@@ -1,0 +1,103 @@
+# SPDX-License-Identifier: Apache-2.0
+# bundle-release.yml - store a source bundle of agent-jail (the executor is a
+# Nushell script, there is no compiled artifact) as a durable GitHub
+# prerelease with SHA256SUMS and PROVENANCE.json. Manual only. Refuses any
+# commit that has a failing or unfinished check run, and refuses to reuse a
+# tag. It does not decide readiness: held PRs stay held until their owner
+# gates close, and this workflow is not run on them without that decision.
+
+name: Bundle release
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Full 40-char commit SHA to bundle"
+        required: true
+      tag:
+        description: "New tag, e.g. bundle-main-1a2b3c4"
+        required: true
+  pull_request:
+    paths:
+      - '.github/workflows/bundle-release.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint bundle-release workflow
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: actionlint (pinned release, checksum verified)
+        run: |
+          v=1.7.7
+          curl -fsSL -o "$RUNNER_TEMP/al.tgz" \
+            "https://github.com/rhysd/actionlint/releases/download/v${v}/actionlint_${v}_linux_amd64.tar.gz"
+          echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  $RUNNER_TEMP/al.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/al.tgz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" .github/workflows/bundle-release.yml
+
+  bundle:
+    name: Bundle ${{ inputs.tag }}
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      checks: read
+    env:
+      SHA: ${{ inputs.sha }}
+      TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Validate inputs and check runs
+        run: |
+          case "$SHA" in ""|*[!0-9a-f]*) echo "sha must be lowercase hex" >&2; exit 1 ;; esac
+          test "${#SHA}" -eq 40
+          case "$TAG" in ""|*[!A-Za-z0-9._-]*) echo "bad tag" >&2; exit 1 ;; esac
+          if gh api "repos/$REPO/git/ref/tags/$TAG" > /dev/null 2>&1; then
+            echo "tag $TAG exists; refusing to overwrite" >&2; exit 1
+          fi
+          gh api "repos/$REPO/commits/$SHA/check-runs?per_page=100" \
+            -q '.check_runs[] | "\(.name)\t\(.status)\t\(.conclusion)"' > checks.tsv
+          cat checks.tsv
+          if awk -F'\t' '$2 != "completed" || ($3 != "success" && $3 != "skipped")' checks.tsv | grep .; then
+            echo "commit has a failing or unfinished check" >&2; exit 1
+          fi
+          wc -l < checks.tsv | tr -d ' ' > nchecks
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+
+      - name: Build bundle, checksums, provenance
+        run: |
+          test "$(git rev-parse HEAD)" = "$SHA"
+          short=$(printf '%s' "$SHA" | cut -c1-7)
+          name="agent-jail-$short"
+          mkdir out
+          git archive --format=tar --prefix="$name/" "$SHA" | gzip -n -9 > "out/$name.tar.gz"
+          ( cd out && sha256sum "$name.tar.gz" > SHA256SUMS )
+          printf '{"repo":"%s","commit":"%s","kind":"source bundle (Nushell executor, no compiled artifact)","check_runs_on_commit":%s,"build_host":"github-hosted ubuntu-latest runner","toolchain":"%s; %s","built_at_utc":"%s","run_url":"%s/%s/actions/runs/%s"}\n' \
+            "$REPO" "$SHA" "$(cat nchecks)" "$(git --version)" "$(gzip --version | head -n 1)" \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$GITHUB_SERVER_URL" "$REPO" "$GITHUB_RUN_ID" > out/PROVENANCE.json
+          cat out/PROVENANCE.json out/SHA256SUMS
+
+      - name: Create prerelease
+        run: |
+          printf 'Source bundle of agent-jail at commit %s. Integrity: SHA256SUMS. Provenance: PROVENANCE.json. A stored build record, not a readiness claim; native FreeBSD jail acceptance is a separate gate.\n' "$SHA" > notes.md
+          gh release create "$TAG" --repo "$REPO" --target "$SHA" --prerelease \
+            --title "$TAG" --notes-file notes.md out/*
+
+      - name: Re-download and verify
+        run: |
+          mkdir verify
+          gh release download "$TAG" --repo "$REPO" --dir verify
+          ( cd verify && sha256sum -c SHA256SUMS )
