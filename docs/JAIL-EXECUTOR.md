@@ -331,3 +331,20 @@ math, record parity with `vm-execute.nu` (pinned shape), resolv.conf handling fo
 path, the patch-floor and `mac_do` gid preflights, and the machine-readable
 contract. Reply-envelope parsing, strict-mbox appending and coord-tick
 executor selection are tested in smolfire, next to that code.
+
+## Installing the executor (pin for coordinators)
+
+Run as root on the FreeBSD host:
+
+    nu bin/install-executor.nu [--prefix /usr/local/libexec/agent-jail] [--immutable]
+
+The script installs `jail-execute.nu` at `<prefix>/<sha256>/jail-execute.nu`
+(root-owned, mode 0555, in a 0555 directory), staging the directory and
+publishing it with one rename. An existing content address is never
+overwritten. It prints one `agent-jail.install.v1` JSON line whose `env` holds
+the `AGENT_JAIL_EXECUTOR_PATH` and `AGENT_JAIL_EXECUTOR_SHA256` values a
+coordinator exports. `--immutable` also sets `schg` on the tree. Because the
+path is content-addressed and writable only by root, a launcher that checks the
+digest and then starts `contract` and `run` as separate processes cannot be
+given different bytes by an unprivileged user. `--allow-nonroot` exists for
+tests only and does not produce a protected install.
