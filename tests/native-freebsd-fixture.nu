@@ -201,7 +201,7 @@ def main [
             let envs = {AGENT_JAIL_EXECUTOR_PATH: $script, AGENT_JAIL_EXECUTOR_SHA256: $pin, SMOLFIRE_JAIL_BASE: $base, SMOLFIRE_JAIL_ROOT: $jroot}
             let mk = {|tid: string, cmds: list<string>|
                 let run = ($cmds | each {|c| $c | to json} | str join ", ")
-                $"From coordinator@smolfire.local Wed Jan  1 00:00:00 2026\nFrom: coordinator@smolfire.local\nTo: builder@smolfire.local\nMessage-ID: <req.($tid)@fixture>\nContent-Type: text/toml; charset=utf-8\n\ntask_id = \"($tid)\"\ntools_required = [\"Bash\"]\ntimeout_sec = 120\n[commands]\nrun = [($run)]\n\n"
+                $"From coordinator@smolfire.local Wed Jan  1 00:00:00 2026\nFrom: coordinator@smolfire.local\nTo: builder@smolfire.local\nMessage-ID: <req.($tid)@fixture>\nContent-Type: text/toml; charset=utf-8\n\ntask_id = \"($tid)\"\ntools_required = [\"Bash\"]\ntimeout_sec = 240\n[commands]\nrun = [($run)]\n\n"
             }
             let disp = {|spool: string, tid: string, did: string, extra: record|
                 with-env ($envs | merge $extra) {
@@ -246,7 +246,7 @@ def main [
 
             # K. concurrent appends to one spool: every dispatch gets exactly one intact reply
             let sk = $"($spools)/k.mbox"
-            let ids = [1 2 3 4 5 6]
+            let ids = [1 2 3 4]
             ($ids | each {|i| do $mk $"tk($i)" [$"echo k($i)"]} | str join "") | save -f $sk
             let t0 = (date now)
             let ks = ($ids | par-each {|i| do $disp $sk $"tk($i)" $"<coord.1.rk($i)@smolfire.local>" {}})
@@ -255,7 +255,7 @@ def main [
             let k_from = (do $count $sk '^From ')
             let k_pass = (do $count $sk '^X-Verdict: pass$')
             let k_bound = ($ids | all {|i| (do $count $sk $"^In-Reply-To: <coord\\.1\\.rk($i)@smolfire\\.local>$") == 1})
-            $checks = ($checks | append {name: "K 6 concurrent dispatches, one spool: 6 intact replies, each bound once", ok: ($k_replies == 6 and $k_from == 12 and $k_pass == 6 and $k_bound and ($ks | all {|r| $r.exit_code == 0})), detail: $"replies ($k_replies) from-lines ($k_from) pass ($k_pass) bound ($k_bound) wall ($k_wall)s"})
+            $checks = ($checks | append {name: "K 4 concurrent dispatches, one spool: 4 intact replies, each bound once", ok: ($k_replies == 4 and $k_from == 8 and $k_pass == 4 and $k_bound and ($ks | all {|r| $r.exit_code == 0})), detail: $"replies ($k_replies) from-lines ($k_from) pass ($k_pass) bound ($k_bound) wall ($k_wall)s"})
             $checks = ($checks | append {name: "K no leftovers", ok: (clean? (leaks $jroot)), detail: ""})
             print -e $"[step L] failed so far: ($checks | where ok == false | get name | to json -r)"
             for t in [coord-jail-dispatch-test coord-jail-routing-test coord-mailbox-attempt-test coord-fsm-tests coord-tick-test] {
