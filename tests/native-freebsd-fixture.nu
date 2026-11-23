@@ -69,7 +69,7 @@ def main [
     mkdir $work $jroot $spools
     chmod 755 $work $jroot
 
-    print -e "[step base]"
+    print -e $"[step base] failed so far: ($checks | where ok == false | get name | to json -r)"
     # --- base: a copy of the host userland, read-only for the jails -----------
     mkdir $base
     let bins = ["/bin/sh" "/bin/cat" "/bin/sleep" "/bin/rm" "/usr/bin/uname" "/usr/bin/id" "/sbin/sysctl" "/sbin/ifconfig" "/usr/bin/touch" "/usr/bin/grep" "/usr/bin/true" "/usr/bin/false" "/usr/bin/seq" "/bin/echo"]
@@ -85,7 +85,7 @@ def main [
     "" | save -f $"($base)/etc/resolv.conf"
     chmod 1777 $"($base)/tmp"
 
-    print -e "[step install]"
+    print -e $"[step install] failed so far: ($checks | where ok == false | get name | to json -r)"
     # --- install the executor and read the pin --------------------------------
     let inst = (^nu $"($aj)/bin/install-executor.nu" --prefix $libexec | complete)
     let inst_line = $inst.stdout | lines | where {|l| $l | str contains "agent-jail.install.v1"} | last
@@ -107,7 +107,7 @@ def main [
     let common = ["--base" $base "--jail-root" $jroot]
     mut cases = []
 
-    print -e "[step A]"
+    print -e $"[step A] failed so far: ($checks | where ok == false | get name | to json -r)"
 
     # A. basic pass, jailed, hardening, no network, read-only base, writable tmp
     let a = (exec $script (["run" "case-a"] ++ $common ++ ["--" "uname -s" "sysctl -n security.jail.jailed" "sysctl -n kern.securelevel" "sh -c 'touch /bin/gl23x 2>/dev/null; echo rc=$?'" "sh -c 'echo a > /tmp/w && cat /tmp/w'" "sh -c 'ifconfig -a | grep -c \"inet \" ; true'"]))
@@ -118,7 +118,7 @@ def main [
     $checks = ($checks | append {name: "A boot_sec reported", ok: (($a.json.boot_sec? | describe) == "int"), detail: $"boot_sec=($a.json.boot_sec?) wall=($a.secs)s"})
     $checks = ($checks | append {name: "A no leftovers", ok: (clean? (leaks $jroot)), detail: (leaks $jroot | to json -r | str substring 0..200)})
 
-    print -e "[step B]"
+    print -e $"[step B] failed so far: ($checks | where ok == false | get name | to json -r)"
 
     # B. option-shaped and multiple commands keep order; failing command => fail
     let b = (exec $script (["run" "case-b"] ++ $common ++ ["--" "echo one" "--looks-like-option" "echo three"]))
@@ -126,7 +126,7 @@ def main [
     $checks = ($checks | append {name: "B option-shaped command is a command, run is fail", ok: ($b.exit == 1 and $b.json.verdict? == "fail" and ($b_cmds | first) == "echo one" and ("--looks-like-option" in $b_cmds)), detail: $"exit ($b.exit) cmds ($b_cmds | to json -r | str substring 0..120)"})
     $checks = ($checks | append {name: "B no leftovers", ok: (clean? (leaks $jroot)), detail: ""})
 
-    print -e "[step C]"
+    print -e $"[step C] failed so far: ($checks | where ok == false | get name | to json -r)"
 
     # C. timeout is bounded and torn down
     let t = (exec $script (["run" "case-c" "--timeout" "4"] ++ $common ++ ["--" "sleep 60"]))
@@ -134,7 +134,7 @@ def main [
     $checks = ($checks | append {name: "C timeout: fail, bounded wall time, 124/137", ok: ($t.exit == 1 and $t.json.verdict? == "fail" and $t.secs < 20 and ($t_exit in [124 137])), detail: $"exit ($t.exit) cmd_exit ($t_exit) wall ($t.secs)s"})
     $checks = ($checks | append {name: "C no leftovers after timeout", ok: (clean? (leaks $jroot)), detail: (leaks $jroot | to json -r | str substring 0..200)})
 
-    print -e "[step D]"
+    print -e $"[step D] failed so far: ($checks | where ok == false | get name | to json -r)"
 
     # D. rctl maxproc is enforced (forks fail) and rules are removed
     let d = (exec $script (["run" "case-d" "--maxproc" "8"] ++ $common ++ ["--" "sh -c 'for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do sleep 1 & done; wait' 2>&1"]))
@@ -142,7 +142,7 @@ def main [
     $checks = ($checks | append {name: "D maxproc=8 refuses forks", ok: ($d_text =~ '(?i)fork|unavailable|retry'), detail: ($d_text | str substring 0..100)})
     $checks = ($checks | append {name: "D no rctl rule left", ok: (clean? (leaks $jroot)), detail: ""})
 
-    print -e "[step E]"
+    print -e $"[step E] failed so far: ($checks | where ok == false | get name | to json -r)"
 
     # E. refusals leave nothing behind
     let e = (exec $script (["run" "case-e" "--base" $"($work)/does-not-exist" "--jail-root" $jroot "--" "true"]))
@@ -151,12 +151,14 @@ def main [
     $checks = ($checks | append {name: "E2 --require-limits passes with racct on", ok: ($e2.exit == 0), detail: $"exit ($e2.exit)"})
     $checks = ($checks | append {name: "E no leftovers", ok: (clean? (leaks $jroot)), detail: ""})
 
-    print -e "[step F]"
+    print -e $"[step F] failed so far: ($checks | where ok == false | get name | to json -r)"
 
     # F. abrupt executor death leaks (documented), reconcile by name, verify clean
     let pidfile = $"($work)/crash.pid"
     ^sh -c $"nu ($script) run case-f --base ($base) --jail-root ($jroot) --timeout 120 -- 'sleep 100' > ($work)/crash.out 2>&1 & echo $! > ($pidfile)"
-    sleep 5sec
+    mut waited = 0
+    while ((^jls name | complete | get stdout | lines | where {|l| $l | str starts-with "sf_case_f"} | is-empty) and $waited < 40) { sleep 1sec; $waited = $waited + 1 }
+    sleep 1sec
     let before = (leaks $jroot)
     let pid = (open $pidfile | str trim)
     ^kill -9 $pid | complete | ignore
@@ -165,14 +167,14 @@ def main [
     let leaked_names = $after_kill.jails
     $checks = ($checks | append {name: "F SIGKILL of executor leaves a recorded jail (known: no crash reaper)", ok: (($before.jails | length) >= 1), detail: $"before ($before.jails | length) after-kill ($after_kill.jails | length)"})
     for n in $leaked_names {
-        ^jail -r $n | complete | ignore
+        ^timeout 30 jail -r $n | complete | ignore
         ^rctl -r $"jail:($n)" | complete | ignore
     }
     for m in ($after_kill.mounts | each {|l| $l | split row --regex '\s+' | get 1} | reverse) { ^umount $m | complete | ignore }
     for d in (try { ls $jroot | get name } catch { [] }) { ^rmdir $d | complete | ignore }
     $checks = ($checks | append {name: "F documented manual reconcile restores a clean host", ok: (clean? (leaks $jroot)), detail: (leaks $jroot | to json -r | str substring 0..200)})
 
-    print -e "[step adapter]"
+    print -e $"[step adapter] failed so far: ($checks | where ok == false | get name | to json -r)"
     # --- adapter against the real CLI ------------------------------------------
     mut adapter_note = "skipped (no --smolfire-sha)"
     if ($smolfire_sha != "" or $smolfire_dir != "") {
@@ -201,7 +203,7 @@ def main [
             }
             let count = {|f: string, pat: string| (open --raw $f | lines | where {|l| $l =~ $pat} | length)}
 
-            print -e "[step G]"
+            print -e $"[step G] failed so far: ($checks | where ok == false | get name | to json -r)"
 
             # G. one reply per dispatch, bound to the dispatch id
             let sg = $"($spools)/g.mbox"
@@ -209,7 +211,7 @@ def main [
             let rg = (do $disp $sg "tg" "<coord.1.rg@smolfire.local>" {})
             $checks = ($checks | append {name: "G adapter + real CLI: exit 0, exactly one reply bound to dispatch id", ok: ($rg.exit_code == 0 and (do $count $sg '^In-Reply-To: <coord\.1\.rg@smolfire\.local>$') == 1 and (do $count $sg '^X-Verdict: pass$') == 1), detail: $"exit ($rg.exit_code) ($rg.stderr | str substring 0..160)"})
 
-            print -e "[step H]"
+            print -e $"[step H] failed so far: ($checks | where ok == false | get name | to json -r)"
 
             # H. refusals become exactly one fail reply
             let sh = $"($spools)/h.mbox"
@@ -225,7 +227,7 @@ def main [
             let ri = (do $disp $si "ti" "<coord.1.ri@smolfire.local>" {AGENT_JAIL_EXECUTOR_PATH: $"($unprot)/jail-execute.nu"})
             $checks = ($checks | append {name: "I executor in a world-writable dir refused as unprotected", ok: ((do $count $si '^X-Verdict: fail') == 1 and (open --raw $si | str contains "not protected")), detail: $"exit ($ri.exit_code)"})
 
-            print -e "[step J]"
+            print -e $"[step J] failed so far: ($checks | where ok == false | get name | to json -r)"
 
             # J. failing command => fail reply, exit 1
             let sj = $"($spools)/j.mbox"
@@ -233,7 +235,7 @@ def main [
             let rj = (do $disp $sj "tj" "<coord.1.rj@smolfire.local>" {})
             $checks = ($checks | append {name: "J failing command: one fail reply, adapter exit 1", ok: ($rj.exit_code == 1 and (do $count $sj '^X-Verdict: fail') == 1), detail: $"exit ($rj.exit_code)"})
 
-            print -e "[step K]"
+            print -e $"[step K] failed so far: ($checks | where ok == false | get name | to json -r)"
 
             # K. concurrent appends to one spool: every dispatch gets exactly one intact reply
             let sk = $"($spools)/k.mbox"
@@ -248,7 +250,7 @@ def main [
             let k_bound = ($ids | all {|i| (do $count $sk $"^In-Reply-To: <coord\\.1\\.rk($i)@smolfire\\.local>$") == 1})
             $checks = ($checks | append {name: "K 6 concurrent dispatches, one spool: 6 intact replies, each bound once", ok: ($k_replies == 6 and $k_from == 12 and $k_pass == 6 and $k_bound and ($ks | all {|r| $r.exit_code == 0})), detail: $"replies ($k_replies) from-lines ($k_from) pass ($k_pass) bound ($k_bound) wall ($k_wall)s"})
             $checks = ($checks | append {name: "K no leftovers", ok: (clean? (leaks $jroot)), detail: ""})
-            print -e "[step L]"
+            print -e $"[step L] failed so far: ($checks | where ok == false | get name | to json -r)"
             for t in [coord-jail-dispatch-test coord-jail-routing-test coord-mailbox-attempt-test coord-fsm-tests coord-tick-test] {
                 let r = (cd $sf; ^timeout 150 nu $"tests/($t).nu" | complete)
                 $checks = ($checks | append {name: $"L smolfire suite ($t) on native nu", ok: ($r.exit_code == 0), detail: $"exit ($r.exit_code) ($r.stderr | str substring 0..160)"})
