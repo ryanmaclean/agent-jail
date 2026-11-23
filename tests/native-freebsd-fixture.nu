@@ -70,7 +70,7 @@ def main [
 
     # --- base: a copy of the host userland, read-only for the jails -----------
     mkdir $base
-    ^sh -c $"cd / && tar -cf - bin sbin lib libexec usr/bin usr/sbin usr/lib usr/libexec | tar -xf - -C ($base)"
+    ^sh -c $"cd / && timeout 300 tar -cf - bin sbin lib libexec usr/bin usr/sbin usr/lib < /dev/null | tar -xf - -C ($base)"
     mkdir $"($base)/etc" $"($base)/dev" $"($base)/tmp" $"($base)/var"
     for f in [passwd group master.passwd pwd.db spwd.db login.conf login.conf.db nsswitch.conf] {
         if ($"/etc/($f)" | path exists) { cp $"/etc/($f)" $"($base)/etc/($f)" }
