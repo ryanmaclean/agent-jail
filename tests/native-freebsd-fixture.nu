@@ -168,7 +168,7 @@ def main [
         ^jail -r $n | complete | ignore
         ^rctl -r $"jail:($n)" | complete | ignore
     }
-    for m in ($after_kill.mounts | each {|l| $l | split row "\t" | get 1} | reverse) { ^umount $m | complete | ignore }
+    for m in ($after_kill.mounts | each {|l| $l | split row --regex '\s+' | get 1} | reverse) { ^umount $m | complete | ignore }
     for d in (try { ls $jroot | get name } catch { [] }) { ^rmdir $d | complete | ignore }
     $checks = ($checks | append {name: "F documented manual reconcile restores a clean host", ok: (clean? (leaks $jroot)), detail: (leaks $jroot | to json -r | str substring 0..200)})
 
