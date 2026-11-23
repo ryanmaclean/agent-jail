@@ -111,7 +111,7 @@ def main [
 
     # A. basic pass, jailed, hardening, no network, read-only base, writable tmp
     let a = (exec $script (["run" "case-a"] ++ $common ++ ["--" "uname -s" "sysctl -n security.jail.jailed" "sysctl -n kern.securelevel" "sh -c 'touch /bin/gl23x 2>/dev/null; echo rc=$?'" "sh -c 'echo a > /tmp/w && cat /tmp/w'" "sh -c 'ifconfig -a | grep -c \"inet \" ; true'"]))
-    $checks = ($checks | append {name: "A pass verdict, exit 0", ok: ($a.exit == 0 and $a.json.verdict? == "pass"), detail: $"exit ($a.exit) ($a.stderr | str substring 0..160)"})
+    $checks = ($checks | append {name: "A pass verdict, exit 0", ok: ($a.exit == 0 and $a.json.verdict? == "pass"), detail: $"exit ($a.exit) ($a.stderr | str substring 0..100) ($a.stdout | str replace --all "\n" " " | str substring 0..600)"})
     $checks = ($checks | append {name: "A FreeBSD + jailed=1 + securelevel=3", ok: ((out-of $a 0) == "FreeBSD" and (out-of $a 1) == "1" and (out-of $a 2) == "3"), detail: $"(out-of $a 0)/(out-of $a 1)/(out-of $a 2)"})
     $checks = ($checks | append {name: "A base read-only (touch refused), tmp writable", ok: ((out-of $a 3) != "rc=0" and (out-of $a 4) == "a"), detail: $"(out-of $a 3) (out-of $a 4)"})
     $checks = ($checks | append {name: "A no network addresses in jail", ok: ((out-of $a 5) == "0"), detail: (out-of $a 5)})
