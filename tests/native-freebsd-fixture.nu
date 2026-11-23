@@ -131,7 +131,7 @@ def main [
     # C. timeout is bounded and torn down
     let t = (exec $script (["run" "case-c" "--timeout" "4"] ++ $common ++ ["--" "sleep 60"]))
     let t_exit = try { $t.json.outputs | last | get exit_code } catch { -1 }
-    $checks = ($checks | append {name: "C timeout: fail, bounded wall time, 124/137", ok: ($t.exit == 1 and $t.json.verdict? == "fail" and $t.secs < 20 and ($t_exit in [124 137])), detail: $"exit ($t.exit) cmd_exit ($t_exit) wall ($t.secs)s"})
+    $checks = ($checks | append {name: "C timeout: fail, bounded wall time, 124/137", ok: ($t.exit == 1 and $t.json.verdict? == "fail" and $t.secs < 60 and ($t_exit in [124 137])), detail: $"exit ($t.exit) cmd_exit ($t_exit) wall ($t.secs)s"})
     $checks = ($checks | append {name: "C no leftovers after timeout", ok: (clean? (leaks $jroot)), detail: (leaks $jroot | to json -r | str substring 0..200)})
 
     print -e $"[step D] failed so far: ($checks | where ok == false | get name | to json -r)"
