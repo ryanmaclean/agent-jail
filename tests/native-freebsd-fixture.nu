@@ -176,8 +176,13 @@ def main [
     mut adapter_note = "skipped (no --smolfire-sha)"
     if $smolfire_sha != "" {
         let sf = $"($work)/smolfire"
-        let g = (^git clone --quiet $smolfire_url $sf | complete)
-        let co = if $g.exit_code == 0 { (^git -C $sf checkout --quiet $smolfire_sha | complete) } else { $g }
+        mkdir $sf
+        with-env {GIT_TERMINAL_PROMPT: "0"} {
+            ^git -C $sf init --quiet | complete | ignore
+            ^git -C $sf remote add origin $smolfire_url | complete | ignore
+        }
+        let g = (with-env {GIT_TERMINAL_PROMPT: "0"} { ^timeout 150 git -C $sf fetch --quiet --depth 1 origin $smolfire_sha | complete })
+        let co = if $g.exit_code == 0 { (^git -C $sf checkout --quiet FETCH_HEAD | complete) } else { $g }
         $checks = ($checks | append {name: "smolfire checkout at pinned sha", ok: ($co.exit_code == 0), detail: $co.stderr})
         if $co.exit_code == 0 {
             let adapter = $"($sf)/bin/coord-jail-dispatch.nu"
