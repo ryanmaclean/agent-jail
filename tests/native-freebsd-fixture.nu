@@ -70,7 +70,12 @@ def main [
 
     # --- base: a copy of the host userland, read-only for the jails -----------
     mkdir $base
-    ^sh -c $"cd / && timeout 300 tar -cf - bin sbin lib libexec usr/bin usr/sbin usr/lib < /dev/null | tar -xf - -C ($base)"
+    let bins = ["/bin/sh" "/bin/cat" "/bin/sleep" "/bin/rm" "/usr/bin/uname" "/usr/bin/id" "/sbin/sysctl" "/sbin/ifconfig" "/usr/bin/touch" "/usr/bin/grep" "/usr/bin/true" "/usr/bin/false" "/usr/bin/seq" "/bin/echo"]
+    let libs = ($bins | each {|b| ^ldd $b | lines | parse --regex '=> (?<p>/\S+)' | get p } | flatten | uniq)
+    for f in ($bins ++ $libs ++ ["/libexec/ld-elf.so.1"]) {
+        mkdir ($"($base)($f)" | path dirname)
+        cp $f $"($base)($f)"
+    }
     mkdir $"($base)/etc" $"($base)/dev" $"($base)/tmp" $"($base)/var"
     for f in [passwd group master.passwd pwd.db spwd.db login.conf login.conf.db nsswitch.conf] {
         if ($"/etc/($f)" | path exists) { cp $"/etc/($f)" $"($base)/etc/($f)" }
