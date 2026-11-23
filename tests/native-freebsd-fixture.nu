@@ -149,7 +149,7 @@ def main [
     $checks = ($checks | append {name: "E missing base refused (exit 1 or 2, fail verdict)", ok: ($e.exit in [1 2] and $e.json.verdict? == "fail"), detail: $"exit ($e.exit) ($e.json.error? | default '' | str substring 0..120)"})
     let e2 = (exec $script (["run" "case-e2" "--require-limits"] ++ $common ++ ["--" "true"]))
     $checks = ($checks | append {name: "E2 --require-limits passes with racct on", ok: ($e2.exit == 0), detail: $"exit ($e2.exit)"})
-    $checks = ($checks | append {name: "E no leftovers", ok: (clean? (leaks $jroot)), detail: ""})
+    $checks = ($checks | append {name: "E no leftovers", ok: (clean? (leaks $jroot)), detail: (leaks $jroot | to json -r | str substring 0..300)})
 
     print -e $"[step F] failed so far: ($checks | where ok == false | get name | to json -r)"
 
