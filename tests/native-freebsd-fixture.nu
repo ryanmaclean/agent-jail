@@ -65,6 +65,9 @@ def main [
     let jroot = $"($work)/jails"
     let libexec = $"($work)/libexec"
     let spools = $"($work)/spool"
+    # A previous interrupted run can leave nullfs/tmpfs/devfs mounts under $work.
+    let stale = (^mount -p | complete | get stdout | lines | each {|l| $l | split row --regex '\s+' | get 1} | where {|p| $p | str starts-with $"($work)/"} | sort | reverse)
+    for m in $stale { ^umount $m | complete | ignore }
     rm -rf $work
     mkdir $work $jroot $spools
     chmod 755 $work $jroot
