@@ -68,6 +68,7 @@ def main [
     mkdir $work $jroot $spools
     chmod 755 $work $jroot
 
+    print -e "[step base]"
     # --- base: a copy of the host userland, read-only for the jails -----------
     mkdir $base
     let bins = ["/bin/sh" "/bin/cat" "/bin/sleep" "/bin/rm" "/usr/bin/uname" "/usr/bin/id" "/sbin/sysctl" "/sbin/ifconfig" "/usr/bin/touch" "/usr/bin/grep" "/usr/bin/true" "/usr/bin/false" "/usr/bin/seq" "/bin/echo"]
@@ -83,6 +84,7 @@ def main [
     "" | save -f $"($base)/etc/resolv.conf"
     chmod 1777 $"($base)/tmp"
 
+    print -e "[step install]"
     # --- install the executor and read the pin --------------------------------
     let inst = (^nu $"($aj)/bin/install-executor.nu" --prefix $libexec | complete)
     let inst_line = $inst.stdout | lines | where {|l| $l | str contains "agent-jail.install.v1"} | last
@@ -104,6 +106,8 @@ def main [
     let common = ["--base" $base "--jail-root" $jroot]
     mut cases = []
 
+    print -e "[step A]"
+
     # A. basic pass, jailed, hardening, no network, read-only base, writable tmp
     let a = (exec $script (["run" "case-a"] ++ $common ++ ["--" "uname -s" "sysctl -n security.jail.jailed" "sysctl -n kern.securelevel" "sh -c 'touch /bin/gl23x 2>/dev/null; echo rc=$?'" "sh -c 'echo a > /tmp/w && cat /tmp/w'" "sh -c 'ifconfig -a | grep -c \"inet \" ; true'"]))
     $checks = ($checks | append {name: "A pass verdict, exit 0", ok: ($a.exit == 0 and $a.json.verdict? == "pass"), detail: $"exit ($a.exit) ($a.stderr | str substring 0..160)"})
@@ -113,11 +117,15 @@ def main [
     $checks = ($checks | append {name: "A boot_sec reported", ok: (($a.json.boot_sec? | describe) == "int"), detail: $"boot_sec=($a.json.boot_sec?) wall=($a.secs)s"})
     $checks = ($checks | append {name: "A no leftovers", ok: (clean? (leaks $jroot)), detail: (leaks $jroot | to json -r | str substring 0..200)})
 
+    print -e "[step B]"
+
     # B. option-shaped and multiple commands keep order; failing command => fail
     let b = (exec $script (["run" "case-b"] ++ $common ++ ["--" "echo one" "--looks-like-option" "echo three"]))
     let b_cmds = try { $b.json.outputs | get cmd } catch { [] }
     $checks = ($checks | append {name: "B option-shaped command is a command, run is fail", ok: ($b.exit == 1 and $b.json.verdict? == "fail" and ($b_cmds | first) == "echo one" and ("--looks-like-option" in $b_cmds)), detail: $"exit ($b.exit) cmds ($b_cmds | to json -r | str substring 0..120)"})
     $checks = ($checks | append {name: "B no leftovers", ok: (clean? (leaks $jroot)), detail: ""})
+
+    print -e "[step C]"
 
     # C. timeout is bounded and torn down
     let t = (exec $script (["run" "case-c" "--timeout" "4"] ++ $common ++ ["--" "sleep 60"]))
@@ -125,11 +133,15 @@ def main [
     $checks = ($checks | append {name: "C timeout: fail, bounded wall time, 124/137", ok: ($t.exit == 1 and $t.json.verdict? == "fail" and $t.secs < 20 and ($t_exit in [124 137])), detail: $"exit ($t.exit) cmd_exit ($t_exit) wall ($t.secs)s"})
     $checks = ($checks | append {name: "C no leftovers after timeout", ok: (clean? (leaks $jroot)), detail: (leaks $jroot | to json -r | str substring 0..200)})
 
+    print -e "[step D]"
+
     # D. rctl maxproc is enforced (forks fail) and rules are removed
     let d = (exec $script (["run" "case-d" "--maxproc" "8"] ++ $common ++ ["--" "sh -c 'for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do sleep 1 & done; wait' 2>&1"]))
     let d_text = try { $d.json.outputs | first | get stdout } catch { "" }
     $checks = ($checks | append {name: "D maxproc=8 refuses forks", ok: ($d_text =~ '(?i)fork|unavailable|retry'), detail: ($d_text | str substring 0..100)})
     $checks = ($checks | append {name: "D no rctl rule left", ok: (clean? (leaks $jroot)), detail: ""})
+
+    print -e "[step E]"
 
     # E. refusals leave nothing behind
     let e = (exec $script (["run" "case-e" "--base" $"($work)/does-not-exist" "--jail-root" $jroot "--" "true"]))
@@ -137,6 +149,8 @@ def main [
     let e2 = (exec $script (["run" "case-e2" "--require-limits"] ++ $common ++ ["--" "true"]))
     $checks = ($checks | append {name: "E2 --require-limits passes with racct on", ok: ($e2.exit == 0), detail: $"exit ($e2.exit)"})
     $checks = ($checks | append {name: "E no leftovers", ok: (clean? (leaks $jroot)), detail: ""})
+
+    print -e "[step F]"
 
     # F. abrupt executor death leaks (documented), reconcile by name, verify clean
     let pidfile = $"($work)/crash.pid"
@@ -157,6 +171,7 @@ def main [
     for d in (try { ls $jroot | get name } catch { [] }) { ^rmdir $d | complete | ignore }
     $checks = ($checks | append {name: "F documented manual reconcile restores a clean host", ok: (clean? (leaks $jroot)), detail: (leaks $jroot | to json -r | str substring 0..200)})
 
+    print -e "[step adapter]"
     # --- adapter against the real CLI ------------------------------------------
     mut adapter_note = "skipped (no --smolfire-sha)"
     if $smolfire_sha != "" {
@@ -178,11 +193,15 @@ def main [
             }
             let count = {|f: string, pat: string| (open --raw $f | lines | where {|l| $l =~ $pat} | length)}
 
+            print -e "[step G]"
+
             # G. one reply per dispatch, bound to the dispatch id
             let sg = $"($spools)/g.mbox"
             (do $mk "tg" ["uname -s" "id -u"]) | save -f $sg
             let rg = (do $disp $sg "tg" "<coord.1.rg@smolfire.local>" {})
             $checks = ($checks | append {name: "G adapter + real CLI: exit 0, exactly one reply bound to dispatch id", ok: ($rg.exit_code == 0 and (do $count $sg '^In-Reply-To: <coord\.1\.rg@smolfire\.local>$') == 1 and (do $count $sg '^X-Verdict: pass$') == 1), detail: $"exit ($rg.exit_code) ($rg.stderr | str substring 0..160)"})
+
+            print -e "[step H]"
 
             # H. refusals become exactly one fail reply
             let sh = $"($spools)/h.mbox"
@@ -198,11 +217,15 @@ def main [
             let ri = (do $disp $si "ti" "<coord.1.ri@smolfire.local>" {AGENT_JAIL_EXECUTOR_PATH: $"($unprot)/jail-execute.nu"})
             $checks = ($checks | append {name: "I executor in a world-writable dir refused as unprotected", ok: ((do $count $si '^X-Verdict: fail') == 1 and (open --raw $si | str contains "not protected")), detail: $"exit ($ri.exit_code)"})
 
+            print -e "[step J]"
+
             # J. failing command => fail reply, exit 1
             let sj = $"($spools)/j.mbox"
             (do $mk "tj" ["true" "false"]) | save -f $sj
             let rj = (do $disp $sj "tj" "<coord.1.rj@smolfire.local>" {})
             $checks = ($checks | append {name: "J failing command: one fail reply, adapter exit 1", ok: ($rj.exit_code == 1 and (do $count $sj '^X-Verdict: fail') == 1), detail: $"exit ($rj.exit_code)"})
+
+            print -e "[step K]"
 
             # K. concurrent appends to one spool: every dispatch gets exactly one intact reply
             let sk = $"($spools)/k.mbox"
