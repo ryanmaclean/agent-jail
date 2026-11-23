@@ -78,7 +78,7 @@ def main [
         mkdir ($"($base)($f)" | path dirname)
         cp $f $"($base)($f)"
     }
-    mkdir $"($base)/etc" $"($base)/dev" $"($base)/tmp" $"($base)/var"
+    mkdir $"($base)/etc" $"($base)/dev" $"($base)/tmp" $"($base)/var" $"($base)/root"
     for f in [passwd group master.passwd pwd.db spwd.db login.conf login.conf.db nsswitch.conf] {
         if ($"/etc/($f)" | path exists) { cp $"/etc/($f)" $"($base)/etc/($f)" }
     }
