@@ -1,0 +1,38 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  nu-tests:
+    name: Nu tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Install Nushell
+        run: |
+          # Single source of truth for the Nushell version: .github/nu-version
+          NU_VERSION="$(tr -d '[:space:]' < .github/nu-version)"
+          ARCH=$(uname -m | sed 's/arm64/aarch64/')
+          case "$(uname -s)" in
+            Linux)  TRIPLE="${ARCH}-unknown-linux-musl" ;;
+            Darwin) TRIPLE="${ARCH}-apple-darwin" ;;
+          esac
+          ARCHIVE="nu-${NU_VERSION}-${TRIPLE}.tar.gz"
+          mkdir -p "$HOME/.local/bin"
+          curl -sSL "https://github.com/nushell/nushell/releases/download/${NU_VERSION}/${ARCHIVE}" \
+            | tar -xz -C "$HOME/.local/bin" --strip-components=1 "nu-${NU_VERSION}-${TRIPLE}/nu"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Run tests
+        run: nu tests/run-all.nu
