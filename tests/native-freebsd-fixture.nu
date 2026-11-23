@@ -42,6 +42,7 @@ def out-of [res: record, i: int] {
 
 def main [
     --smolfire-sha: string = ""
+    --smolfire-dir: string = ""
     --smolfire-url: string = "https://github.com/ryanmaclean/smolfire.git"
     --work: string = "/var/db/agent-jail-fixture"
     --keep
@@ -174,15 +175,17 @@ def main [
     print -e "[step adapter]"
     # --- adapter against the real CLI ------------------------------------------
     mut adapter_note = "skipped (no --smolfire-sha)"
-    if $smolfire_sha != "" {
-        let sf = $"($work)/smolfire"
-        mkdir $sf
-        with-env {GIT_TERMINAL_PROMPT: "0"} {
+    if ($smolfire_sha != "" or $smolfire_dir != "") {
+        let sf = if $smolfire_dir != "" { $smolfire_dir } else { $"($work)/smolfire" }
+        let co = if $smolfire_dir != "" {
+            {exit_code: (if ($"($sf)/bin/coord-jail-dispatch.nu" | path exists) { 0 } else { 1 }), stderr: "adapter missing in --smolfire-dir"}
+        } else {
+            mkdir $sf
             ^git -C $sf init --quiet | complete | ignore
             ^git -C $sf remote add origin $smolfire_url | complete | ignore
+            let g = (with-env {GIT_TERMINAL_PROMPT: "0"} { ^timeout 150 git -C $sf fetch --quiet --depth 1 origin $smolfire_sha | complete })
+            if $g.exit_code == 0 { (^git -C $sf checkout --quiet FETCH_HEAD | complete) } else { $g }
         }
-        let g = (with-env {GIT_TERMINAL_PROMPT: "0"} { ^timeout 150 git -C $sf fetch --quiet --depth 1 origin $smolfire_sha | complete })
-        let co = if $g.exit_code == 0 { (^git -C $sf checkout --quiet FETCH_HEAD | complete) } else { $g }
         $checks = ($checks | append {name: "smolfire checkout at pinned sha", ok: ($co.exit_code == 0), detail: $co.stderr})
         if $co.exit_code == 0 {
             let adapter = $"($sf)/bin/coord-jail-dispatch.nu"
@@ -245,6 +248,11 @@ def main [
             let k_bound = ($ids | all {|i| (do $count $sk $"^In-Reply-To: <coord\\.1\\.rk($i)@smolfire\\.local>$") == 1})
             $checks = ($checks | append {name: "K 6 concurrent dispatches, one spool: 6 intact replies, each bound once", ok: ($k_replies == 6 and $k_from == 12 and $k_pass == 6 and $k_bound and ($ks | all {|r| $r.exit_code == 0})), detail: $"replies ($k_replies) from-lines ($k_from) pass ($k_pass) bound ($k_bound) wall ($k_wall)s"})
             $checks = ($checks | append {name: "K no leftovers", ok: (clean? (leaks $jroot)), detail: ""})
+            print -e "[step L]"
+            for t in [coord-jail-dispatch-test coord-jail-routing-test coord-mailbox-attempt-test coord-fsm-tests coord-tick-test] {
+                let r = (cd $sf; ^timeout 150 nu $"tests/($t).nu" | complete)
+                $checks = ($checks | append {name: $"L smolfire suite ($t) on native nu", ok: ($r.exit_code == 0), detail: $"exit ($r.exit_code) ($r.stderr | str substring 0..160)"})
+            }
             $adapter_note = $"adapter at ($smolfire_sha | str substring 0..8)"
         }
     }
