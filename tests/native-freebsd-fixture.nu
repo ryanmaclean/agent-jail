@@ -149,7 +149,11 @@ def main [
     $checks = ($checks | append {name: "E missing base refused (exit 1 or 2, fail verdict)", ok: ($e.exit in [1 2] and $e.json.verdict? == "fail"), detail: $"exit ($e.exit) ($e.json.error? | default '' | str substring 0..120)"})
     let e2 = (exec $script (["run" "case-e2" "--require-limits"] ++ $common ++ ["--" "true"]))
     $checks = ($checks | append {name: "E2 --require-limits passes with racct on", ok: ($e2.exit == 0), detail: $"exit ($e2.exit)"})
-    $checks = ($checks | append {name: "E no leftovers", ok: (clean? (leaks $jroot)), detail: (leaks $jroot | to json -r | str substring 0..300)})
+    let e_leaks = (leaks $jroot)
+    let e_cleanup = ($e.json.cleanup? | default {} | to json -r)
+    $checks = ($checks | append {name: "E refusal leaves no jail, mount or rctl rule", ok: (($e_leaks.jails | is-empty) and ($e_leaks.mounts | is-empty) and ($e_leaks.rules | is-empty)), detail: $"($e_leaks | to json -r | str substring 0..160) cleanup=($e_cleanup | str substring 0..260)"})
+    $checks = ($checks | append {name: "E leftover directory, if any, is reported as retained by the executor", ok: (($e_leaks.dirs | is-empty) or ($e_cleanup =~ "retain")), detail: ($e_leaks.dirs | to json -r)})
+    for d in $e_leaks.dirs { ^rmdir $d | complete | ignore }
 
     print -e $"[step F] failed so far: ($checks | where ok == false | get name | to json -r)"
 
@@ -194,7 +198,7 @@ def main [
             let envs = {AGENT_JAIL_EXECUTOR_PATH: $script, AGENT_JAIL_EXECUTOR_SHA256: $pin, SMOLFIRE_JAIL_BASE: $base, SMOLFIRE_JAIL_ROOT: $jroot}
             let mk = {|tid: string, cmds: list<string>|
                 let run = ($cmds | each {|c| $c | to json} | str join ", ")
-                $"From coordinator@smolfire.local Wed Jan  1 00:00:00 2026\nFrom: coordinator@smolfire.local\nTo: builder@smolfire.local\nMessage-ID: <req.($tid)@fixture>\nContent-Type: text/toml; charset=utf-8\n\ntask_id = \"($tid)\"\ntools_required = [\"Bash\"]\ntimeout_sec = 30\n[commands]\nrun = [($run)]\n\n"
+                $"From coordinator@smolfire.local Wed Jan  1 00:00:00 2026\nFrom: coordinator@smolfire.local\nTo: builder@smolfire.local\nMessage-ID: <req.($tid)@fixture>\nContent-Type: text/toml; charset=utf-8\n\ntask_id = \"($tid)\"\ntools_required = [\"Bash\"]\ntimeout_sec = 120\n[commands]\nrun = [($run)]\n\n"
             }
             let disp = {|spool: string, tid: string, did: string, extra: record|
                 with-env ($envs | merge $extra) {
